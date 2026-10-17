@@ -195,7 +195,6 @@ input, select { background: var(--panel-2); border: 1px solid var(--line); borde
   <button id="changeServer" hidden>Change server</button>
   <span class="spacer"></span>
   <button id="soundBtn" aria-pressed="true">Sound: on</button>
-  <button id="inviteBtn" hidden>Invite a friend</button>
   <button id="controlsBtn">Controls</button>
 </header>
 <main>
@@ -307,14 +306,6 @@ input, select { background: var(--panel-2); border: 1px solid var(--line); borde
   <video id="scanVideo" playsinline muted style="display:block; width:min(320px, 80vw); aspect-ratio:1; object-fit:cover; background:#000; border-radius:8px"></video>
   <p class="sub" id="scanHelp">Point the camera at the invite's QR code.</p>
   <div class="row"><button id="scanClose" autofocus>Cancel</button></div>
-</dialog>
-<dialog id="inviteDialog" aria-labelledby="inviteTitle">
-  <h2 id="inviteTitle">Invite a friend</h2>
-  <p class="sub">Whoever joins with this skips the Waiting Room and joins your group. If the host shuts your group out,
-    everyone in it goes, you too: only invite people you trust.</p>
-  <canvas id="inviteQr" width="1" height="1" style="display:block; width:200px; height:200px; margin:8px auto; image-rendering:pixelated"></canvas>
-  <p class="sub" id="inviteLink" style="font-family:var(--mono); overflow-wrap:anywhere"></p>
-  <div class="row"><button id="inviteCopy">Copy link</button><button id="inviteClose" autofocus>Close</button></div>
 </dialog>
 <dialog id="deleteDialog" aria-labelledby="deleteTitle">
   <h2 id="deleteTitle">Delete your character?</h2>
@@ -428,7 +419,7 @@ function toggleHelp() { SHOW_HELP = !SHOW_HELP; store.set(HELP_KEY, SHOW_HELP ? 
 let SERVER_NAME = store.get(NAME_KEY) || "";
 setTimeout(() => setTitle());  // (once the rest of this script's run)
 // the page's title: "Psybeam v<version> - <server name>" (the version: the server's, filled in as it serves the page)
-const VERSION = "0.1.424";
+const VERSION = "0.1.433";
 function setTitle() {
   document.title = (VERSION.startsWith("__") ? "Psybeam" : `Psybeam v${VERSION}`) + (SERVER_NAME ? ` - ${SERVER_NAME}` : "");
 }
@@ -731,7 +722,6 @@ function renderMe() {
   const el = $("#me"); el.style.display = "";
   $("#pid").textContent = ME.id;
   $("#deleteRow").hidden = false;
-  $("#inviteBtn").hidden = false;
   el.innerHTML = `<h2>${esc(ME.name)}</h2>
     <dl class="stats">
       <dt>Money</dt><dd>¥${ME.money.toLocaleString()}</dd>
@@ -1473,8 +1463,9 @@ const FONT_SUBST = {"'": "’", "\"": "”"};
 // what the server's map and sprite info hold, by version: browsers keep world files a day, so a change to that
 // info (or its sprites' pictures) bumps this to fetch it afresh (2: sprites' shadow sizes; 3: sprites drawn
 // through their subsprite tables; 4-6: the message box's B button, ringed; 7: the balls' sine table and open
-// frame; 8: the party menu's words in battle; 9: its words for a Pokémon's menu, the summary screen's move cursor)
-const WORLD_DATA = 11;
+// frame; 8: the party menu's words in battle; 9: its words for a Pokémon's menu, the summary screen's move cursor;
+// 12: the Trainer Card's front alone, its background apart, for turning it over)
+const WORLD_DATA = 12;
 // ---- the game's sound effects (frapi.sounds): the server renders them from the ROM, a WAV a category (UI, overworld,
 // battle, jingles), each with where its sounds are in it; /world/sounds.json says what there is (and the names of the
 // songs the game's scripts play: sfxSong). Fetched from the first press or click (a page can't start sound before one),
@@ -4099,10 +4090,11 @@ $("#deleteChar").onclick = () => {
 };
 $("#controlsBtn").onclick = () => $("#controls").showModal();
 // ---- QR codes (your friend invite's), made here: psybeam/qr.py's, ported as it is ---------------------------
-// Byte mode, error correction level M, the smallest version 1-10 the text fits in, the mask with the lowest
+// Byte mode, error correction level L (the lightest: on a screen, it's never damaged), the smallest version 1-10 the
+// text fits in, the mask with the lowest
 // penalty (ISO 18004). qrMatrix(text) -> rows of "1" (dark) and "0" (light), without the quiet zone around it.
 const qrMatrix = (() => {
-  const ECC = [0, 10, 16, 26, 18, 24, 16, 18, 22, 22, 26], BLOCKS = [0, 1, 1, 1, 2, 2, 4, 4, 4, 5, 5];  // (level M, by version)
+  const ECC = [0, 7, 10, 15, 20, 26, 18, 20, 24, 30, 18], BLOCKS = [0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 4];  // (level L, by version)
   const MASKS = [(x, y) => (x + y) % 2 === 0, (x, y) => y % 2 === 0, (x, y) => x % 3 === 0, (x, y) => (x + y) % 3 === 0,
     (x, y) => (Math.floor(x / 3) + Math.floor(y / 2)) % 2 === 0, (x, y) => x * y % 2 + x * y % 3 === 0,
     (x, y) => (x * y % 2 + x * y % 3) % 2 === 0, (x, y) => ((x + y) % 2 + x * y % 3) % 2 === 0];
@@ -4200,7 +4192,7 @@ const qrMatrix = (() => {
       for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) put(ax + dx, ay + dy, Math.max(Math.abs(dx), Math.abs(dy)) !== 1);
     }));
     const putFormat = mask => {
-      let bits = mask, rem = bits;  // (level M's two format bits: 0)
+      let bits = 1 << 3 | mask, rem = bits;  // (level L's two format bits: 01)
       for (let k = 0; k < 10; k++) rem = (rem << 1) ^ ((rem >> 9) * 0x537);
       bits = (bits << 10 | rem) ^ 0x5412;
       const bit = i => ((bits >> i) & 1) === 1;
@@ -4234,23 +4226,14 @@ const qrMatrix = (() => {
   };
 })();
 // your invite for a friend: the server's (its internet one, as it says), with your passcode (p=: its 16 bytes,
-// base64url), and its QR code, both made here: your passcode isn't sent anywhere for it
-$("#inviteBtn").onclick = async () => {
-  if (!PASSCODE) return;  // (every login gives this browser one: not yet, then)
-  let r;
-  try { r = await send({type: "invite"}); } catch (e) { log(e.message); return; }
+// base64url), made here: your passcode isn't sent anywhere for it. Shown only as its QR code, on the back of your
+// Trainer Card (cardBack): never a link to copy
+async function friendLink() {
+  if (!PASSCODE) throw new Error("no passcode yet");  // (every login gives this browser one: not yet, then)
+  const r = await send({type: "invite"});
   const bytes = PASSCODE.replace(/-/g, "").match(/../g).map(h => parseInt(h, 16));
-  const link = r.link + "&p=" + btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-  const rows = qrMatrix(link), cv = $("#inviteQr"), n = rows.length + 8, g = cv.getContext("2d");
-  cv.width = cv.height = n;
-  g.fillStyle = "#fff"; g.fillRect(0, 0, n, n); g.fillStyle = "#000";
-  rows.forEach((row, y) => { for (let x = 0; x < row.length; x++) if (row[x] === "1") g.fillRect(x + 4, y + 4, 1, 1); });
-  $("#inviteLink").textContent = link;
-  $("#inviteCopy").textContent = "Copy link";
-  $("#inviteCopy").onclick = () => navigator.clipboard.writeText(link).then(() => { $("#inviteCopy").textContent = "Copied"; }, () => {});
-  $("#inviteDialog").showModal();
-};
-$("#inviteClose").onclick = () => $("#inviteDialog").close();
+  return r.link + "&p=" + btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
 $("#controlsClose").onclick = () => $("#controls").close();
 $("#controls").addEventListener("click", e => {  // (a click outside it, on the backdrop: closes)
   const r = $("#controls").getBoundingClientRect();
@@ -6560,27 +6543,112 @@ function drawStartMenu(g) {
     if (FONT.help && FONT.help["A"]) help.split("\n").forEach((line, i) => drawText(g, line, "help", 2, 125 + 15 * i));
   }
 }
-// ---- the Trainer Card (trainer_card.c): your name in the start menu, its front ----------------------------------
-// It fades in and out as the party menu does (that screen's machinery, with P.card). On the card (world.battle_ui
-// trainer_card: a girl's in her colors), in window 1 (from (8, 8)), in the normal font, dark gray on light gray:
-// NAME: at (20, 29), IDNo. at (142, 10), MONEY at (20, 56) with the ¥ amount ending at 134, POKéDEX at (20, 72)
-// with the count ending at 136 (once you have one), TIME at (20, 88): hours right-aligned at 101, the colon at 119
-// (blinking: 61 frames on, 61 off), minutes at 124. Your picture (your outfit's) in window 2 (from (152, 40)), at
-// (13, 4) in it. B (or A: there's no back to turn to) closes it.
+// ---- the Trainer Card (trainer_card.c): your name in the start menu, its two sides -------------------------------
+// It fades in and out as the party menu does (that screen's machinery, with P.card). Behind it, the screen's own
+// background (world.battle_ui trainer_card_bg: BG2), which stays put as the card turns over; on it, the card (BG0):
+// its front (trainer_card: a girl's both in her colors), or its back, ours (sprites/invite_card.png): your friend
+// invite (the only place it's shown), its QR code made here (qrMatrix) at CARD_QR, 2 pixels a module, with the
+// asset's words beside it.
+// The front's words, in window 1 (from (8, 8)), in the normal font, dark gray on light gray: NAME: at (20, 29), IDNo.
+// at (142, 10), MONEY at (20, 56) with the ¥ amount ending at 134, POKéDEX at (20, 72) with the count ending at 136
+// (once you have one), TIME at (20, 88): hours right-aligned at 101, the colon at 119 (blinking: 61 frames on, 61
+// off), minutes at 124. Your picture (your outfit's) in window 2 (from (152, 40)), at (13, 4) in it.
+// A on the front turns it over (SE_CARD_FLIP), B closes it; on the back, B turns it back, A closes it. (A friend
+// invite is its QR code alone: never a link to copy.)
 const CARD_IMG = {};
+const CARD_QR = {x: 25, y: 51, size: 82, ink: "#282828"};  // (where the asset leaves it room: 41 modules, 2 pixels each)
 function cardOpen() {
   if (!WORLD.me) return;
   send({type: "trainer_card"}).then(c => {
     if (!WORLD.start || WORLD.party) return;
-    const bg = "trainer_card" + (c.female ? "_female" : "");
-    Promise.all([loadImage(`/world/battle_ui/${bg}.png`), loadImage(`/world/trainer/front/${c.pic}.png`)]).then(([card, pic]) => {
-      Object.assign(CARD_IMG, {card, pic});
-      if (WORLD.start && !WORLD.party) { WORLD.party = {phase: "out", t0: performance.now(), card: c, held: null}; sfx("card_open"); }
+    const her = c.female ? "_female" : "";
+    Promise.all([loadImage(`/world/battle_ui/trainer_card${her}.png?v=${WORLD_DATA}`), loadImage(`/world/battle_ui/trainer_card_bg${her}.png?v=${WORLD_DATA}`),
+                 loadImage(`/world/trainer/front/${c.pic}.png`), loadImage("/sprites/invite_card.png")]).then(([card, bg, pic, back]) => {
+      Object.assign(CARD_IMG, {card, bg, pic, back});
+      if (WORLD.start && !WORLD.party) { WORLD.party = {phase: "out", t0: performance.now(), card: c, held: null, back: false}; sfx("card_open"); }
+      cardBack();  // (made now, so it's ready when it's turned over)
     }, e => log("world: " + e.message));
   }).catch(e => log("world: " + e.message));
 }
+// the back: the asset, with your friend invite's QR code on it (friendLink); without a passcode yet, the asset alone
+async function cardBack() {
+  const cv = document.createElement("canvas"), g = cv.getContext("2d");
+  cv.width = 240; cv.height = 160;
+  g.drawImage(CARD_IMG.back, 0, 0);
+  CARD_IMG.backSide = cv;
+  const link = await friendLink().catch(() => null);
+  if (!link) return;
+  const rows = qrMatrix(link), k = 2, at = (CARD_QR.size - rows.length * k) / 2;  // (another size: centered in its room)
+  g.fillStyle = CARD_QR.ink;
+  rows.forEach((row, y) => { for (let x = 0; x < row.length; x++) if (row[x] === "1") g.fillRect(CARD_QR.x + at + x * k, CARD_QR.y + at + y * k, k, k); });
+}
+// turning it over (Task_DoCardFlipTask), a step a frame from A or B: the card squeezed into a band about the screen's
+// middle line, cardTop 7 more a frame to 77 (Task_AnimateCardFlipDown), the other side put on it a frame later
+// (Task_DrawFlippedCardSide), then (Task_SetCardFlipped, SE_CARD_FLIPPING) opened out again, cardTop 5 less a frame to
+// 0 (Task_AnimateCardFlipUp); its words and picture (BG1) hidden meanwhile. In the band (WIN0) each line shows a row
+// of the card (BG0VOFS, a line at a time: cardFlipRows), the card darkened (BLDY: (cardTop + 40) / 10, none to 4).
+// Done (Task_EndCardFlip), SE_CARD_OPEN.
+const CARD_FLIP_DOWN = 11, CARD_FLIP_SWAP = 13, CARD_FLIP_DONE = 30;  // (frames from the press: 1-11 down, 14-29 up)
+function cardFlip(P, now) {
+  if (P.flip || P.phase !== "open") return;
+  P.flip = {t0: now};
+  sfx("card_flip");
+}
+function cardA(P, now) {
+  if (P.flip) return;
+  if (P.back) partyCloseCard(P); else cardFlip(P, now);
+}
+function cardB(P, now) {  // (true: B's dealt with; false: it closes the card)
+  if (P.flip) return true;
+  if (!P.back) return false;
+  cardFlip(P, now);
+  return true;
+}
+function partyCloseCard(P) { P.closing = true; partyClose(); }
+// (unsigned 32-bit arithmetic, as the game's u32s)
+const u32 = n => ((n % 4294967296) + 4294967296) % 4294967296;
+function cardFlipRows(top, down) {
+  const rows = [], r7 = top, r9 = 160 - r7, r4 = r9 - r7;
+  let r6 = u32(-r7 * 65536), r5 = u32(Math.floor(0xA00000 / r4) + 0xFFFF0000);
+  const last = u32(r6 + r5 * r4), r10 = Math.floor(r5 / r4);
+  r5 = down ? u32(r5 * 2) : Math.floor(r5 / 2);
+  for (let i = 0; i < 160; i++) {
+    let off;
+    if (i < r7) off = -i;
+    else if (i < r9) { off = Math.floor(r6 / 65536); r6 = u32(r6 + r5); r5 = down ? u32(r5 - r10) : u32(r5 + r10); }
+    else off = Math.floor(last / 65536);
+    rows.push((i + off) & 0x1FF);  // (BG0's map is 512 tall: past the card's 160, nothing)
+  }
+  return rows;
+}
+const CARD_BAND = document.createElement("canvas");
+CARD_BAND.width = 240; CARD_BAND.height = 160;
 function drawCard(g, P, now) {
-  const c = P.card, at = (s, x, y) => drawText(g, s, "neutral", 8 + x, 8 + y);
+  const c = P.card;
+  if (CARD_IMG.bg) g.drawImage(CARD_IMG.bg, 0, 0);
+  const side = () => P.back ? CARD_IMG.backSide : CARD_IMG.card;
+  if (P.flip) {
+    const k = Math.floor((now - P.flip.t0) / FRAME_MS);
+    if (k >= CARD_FLIP_SWAP && !P.flip.swapped) { P.flip.swapped = true; P.back = !P.back; sfx("card_flipping"); }
+    if (k > CARD_FLIP_DONE) { P.flip = null; sfx("card_open"); }
+    else {
+      const top = k <= CARD_FLIP_DOWN ? Math.min(77, 7 * k) : k < CARD_FLIP_SWAP + 1 ? 77 : Math.max(0, 77 - 5 * (k - CARD_FLIP_SWAP));
+      const rows = cardFlipRows(top, k <= CARD_FLIP_SWAP), img = side(), b = CARD_BAND.getContext("2d");
+      b.clearRect(0, 0, 240, 160);
+      if (img) for (let y = top; y < 160 - top; y++) if (rows[y] < 160) b.drawImage(img, 0, rows[y], 240, 1, 0, y, 240, 1);
+      const darken = Math.floor((top + 40) / 10);
+      if (darken > 4) {  // (BLDY on BG0 alone: the card's pixels, a sixteenth darker a step)
+        b.globalCompositeOperation = "source-atop";
+        b.fillStyle = `rgba(0, 0, 0, ${darken / 16})`;
+        b.fillRect(0, 0, 240, 160);
+        b.globalCompositeOperation = "source-over";
+      }
+      g.drawImage(CARD_BAND, 0, 0);
+      return;
+    }
+  }
+  if (P.back) { if (CARD_IMG.backSide) g.drawImage(CARD_IMG.backSide, 0, 0); return; }
+  const at = (s, x, y) => drawText(g, s, "neutral", 8 + x, 8 + y);
   const width = s => glyphs(s, "neutral").reduce((n, gl) => n + glyphWidth(gl), 0);
   if (CARD_IMG.card) g.drawImage(CARD_IMG.card, 0, 0);
   if (CARD_IMG.pic) g.drawImage(CARD_IMG.pic, 152 + 13, 40 + 4);
@@ -7802,6 +7870,7 @@ function partyOpen() {
 }
 function partyClose() {
   const P = WORLD.party;
+  if (P && P.card && !P.closing && cardB(P, performance.now())) return;  // (the back: turned back over first)
   if (P && P.townMap) { tmapKey(P, "B"); return; }
   if (P && P.mart) { if (P.phase === "open") martB(P); return; }
   if (P && P.tmCase) { tmB(P); return; }
@@ -7990,7 +8059,7 @@ function partyA() {
   if (P && P.townMap) { tmapKey(P, "A"); return; }
   if (!P || P.phase !== "open") return;
   if (P.summary) { summaryKey(P.summary, "A"); return; }
-  if (P.card) { partyClose(); return; }  // (its back isn't here: A closes it too)
+  if (P.card) { cardA(P, performance.now()); return; }  // (the front: turned over; the back: closed)
   if (P.mart) { martA(P); return; }
   if (P.tmCase) { tmA(P); return; }
   if (P.bag) { bagA(P); return; }
@@ -10242,7 +10311,7 @@ function partyTap(P, p, mouse, e) {
   if (P.phase !== "open") return;
   if (P.summary) { summaryDown(P.summary, p, e); return; }
   const [x, y] = p;
-  if (P.card) { partyClose(); return; }
+  if (P.card) { cardA(P, performance.now()); return; }  // (a tap: as A)
   if (P.mart) { martTap(P, p, mouse, e); return; }
   if (P.tmCase) { tmTap(P, p, mouse, e); return; }
   if (P.bag) { bagTap(P, p, mouse, e); return; }
