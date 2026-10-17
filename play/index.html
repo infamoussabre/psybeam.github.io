@@ -359,7 +359,8 @@ function readInvite(s) {
   } catch (e) { return null; }
 }
 const HASH = new URLSearchParams(location.hash.slice(1));
-let INVITE = readInvite(HASH.get("s")) || readInvite(store.get(INVITE_KEY));
+const LAST_INVITE = readInvite(store.get(INVITE_KEY));  // (the one joined before this page opened: oldToken's)
+let INVITE = readInvite(HASH.get("s")) || LAST_INVITE;
 if (INVITE) store.set(INVITE_KEY, INVITE.s);
 // your passcode for this server (a new player needs one): from a friend's invite (p=…, its 16 bytes), or the one the
 // host gave you from the Waiting Room. Kept by the invite, as it's needed before the server's ID is known
@@ -375,7 +376,18 @@ if (PASSCODE) store.set(PASSCODE_KEY, PASSCODE);
 function forgetPasscode() { PASSCODE = null; store.del(PASSCODE_KEY); }
 // your token, per server: kept by the server's own ID (its server_info's), so another server that turns up at the
 // same address (a new install, someone else's) is never sent it, and never has it wiped
-const tokenKey = id => "psybeam_token#" + id;
+// and by its certificate's fingerprint too: a server can say it has any ID, but only one with that certificate gets
+// past the browser's DTLS, so another server claiming this one's ID is never sent its token
+const tokenKey = id => "psybeam_token#" + INVITE.fp.replace(/:/g, "") + "#" + id;
+// a token kept from before, by the ID alone: kept now by the fingerprint too, if it's the server this browser last
+// joined (as it most likely is). Not for any other server: one claiming the ID could be anyone's
+function oldToken(id) {
+  const old = "psybeam_token#" + id, t = store.get(old);
+  if (!t || !LAST_INVITE || LAST_INVITE.fp !== INVITE.fp) return null;
+  store.set(tokenKey(id), t);
+  store.del(old);
+  return t;
+}
 let SERVER_ID = null, TOKEN_KEY = null;
 // a login link (the admin page's "Login link": an invite, then &login=…): its character, played in this browser from
 // now on. It works once, so it's taken out of the address at once (not left to be bookmarked, or tried again on a
@@ -419,7 +431,7 @@ function toggleHelp() { SHOW_HELP = !SHOW_HELP; store.set(HELP_KEY, SHOW_HELP ? 
 let SERVER_NAME = store.get(NAME_KEY) || "";
 setTimeout(() => setTitle());  // (once the rest of this script's run)
 // the page's title: "Psybeam v<version> - <server name>" (the version: the server's, filled in as it serves the page)
-const VERSION = "0.1.433";
+const VERSION = "0.1.440";
 function setTitle() {
   document.title = (VERSION.startsWith("__") ? "Psybeam" : `Psybeam v${VERSION}`) + (SERVER_NAME ? ` - ${SERVER_NAME}` : "");
 }
@@ -441,7 +453,12 @@ let PC = null, CHANNEL_OPEN, channelOpened;
 // told so, and shown the server card, still trying meanwhile
 const UNREACHED_TELL = 60000;
 let UNREACHED_SINCE = null, UNREACHED_TOLD = false;  // (CHANNEL_OPEN: settles once a channel's open; a new one once it's closed)
-const channelWait = () => { CHANNEL_OPEN = new Promise(r => { channelOpened = r; }); };
+const channelWait = () => { CHANNEL_OPEN = new Promise(r => { channelOpened = r; }); LOGGED_IN = false; };
+// logged in on this channel (hello): before then the server sends only the New Player card's files
+// (Hub.PRE_LOGIN_FILE); the rest are asked for once it is (serverFetch waits)
+let LOGGED_IN = false;
+const LOGIN_WAITERS = [];
+const PRE_LOGIN_FILE = /^\/world\/((pokemon|trainer)\/front\/\d{1,3}\.png|(pokemon|trainer)\/placement\.json)$/;
 channelWait();
 function iceToken() {
   const abc = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -500,7 +517,7 @@ function connect() {
     try { info = await send({type: "server_info"}); setServerName(info.name); } catch (e) {}
     if (info && info.server_id) { SERVER_ID = info.server_id; TOKEN_KEY = tokenKey(info.server_id); }  // (which server
     //                                                                                                this is: its token)
-    const t = TOKEN_KEY && store.get(TOKEN_KEY);
+    const t = TOKEN_KEY && (store.get(TOKEN_KEY) || oldToken(SERVER_ID));
     if (LOGIN_CODE) {  // (a login link's: its character's this browser's now, with the token it's given)
       const login = LOGIN_CODE;
       LOGIN_CODE = null;
@@ -570,6 +587,10 @@ async function serverFetch(path, opts = {}) {
       await new Promise(r => setTimeout(r, 1000));
       continue;
     }
+    if (!LOGGED_IN && !PRE_LOGIN_FILE.test(path.split("?")[0])) {  // (once they're in, on whichever channel)
+      await new Promise(r => LOGIN_WAITERS.push(r));
+      continue;
+    }
     try {
       const r = await Promise.race([send({type: "file", path}),
                                     new Promise((_, no) => setTimeout(() => no(new Error("timed out")), FILE_WAIT))]);
@@ -601,6 +622,8 @@ async function hello(args) {
   try {
     // (with the passcode this browser has, if any: a browser without the character's own is sent it)
     const r = await send(Object.assign({type: "hello", protocol: PROTOCOL, passcode: PASSCODE}, args));
+    LOGGED_IN = true;
+    LOGIN_WAITERS.splice(0).forEach(go => go());
     checkBuild(r.builds);
     if (r.token) store.set(TOKEN_KEY, r.token);
     if (r.passcode) { PASSCODE = r.passcode; store.set(PASSCODE_KEY, PASSCODE); }  // (yours, never sent before: kept here)
@@ -4255,7 +4278,6 @@ function pickServer() {
   const v = $("#server").value.trim(), s = (v.match(/(?:^|[#&?])s=([\w-]+)/) || [, v])[1];
   if (!readInvite(s)) { $("#connectHelp").textContent = "That isn't an invite link: copy the whole link you were sent."; return; }
   const login = (v.match(/[#&]login=([\w-]+)/) || [])[1];  // (a login link: an invite too)
-  store.set(INVITE_KEY, s);
   location.hash = "s=" + s + (login ? "&login=" + login : "");
   location.reload();
 }
