@@ -3,7 +3,7 @@
 // doesn't (down, or no network), so invite links and QR codes still open the game. The game itself never comes
 // from here: it talks straight to the host's server, and keeps the host's files in a cache of its own
 // ("psybeam-files"), which this leaves alone.
-const CACHE = "psybeam-site-0.1.423-cd5c3c8839";
+const CACHE = "psybeam-site-0.1.424-c9cd57f1bb";
 const SHELL = ["./", "play/", "manifest.webmanifest", "icon-180.png", "icon-192.png", "icon-512.png"];
 const WAIT_MS = 4000;  // (the site this slow: the kept copy, rather than waiting on)
 
@@ -17,7 +17,7 @@ self.addEventListener("activate", e => {
 });
 self.addEventListener("fetch", e => {
   const url = new URL(e.request.url);
-  if (e.request.method !== "GET" || url.origin !== location.origin || url.pathname.endsWith(".zip")) return;
+  if (e.request.method !== "GET" || url.origin !== location.origin) return;
   e.respondWith((async () => {
     const cache = await caches.open(CACHE);
     const fresh = fetch(e.request).then(r => {

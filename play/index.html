@@ -428,7 +428,7 @@ function toggleHelp() { SHOW_HELP = !SHOW_HELP; store.set(HELP_KEY, SHOW_HELP ? 
 let SERVER_NAME = store.get(NAME_KEY) || "";
 setTimeout(() => setTitle());  // (once the rest of this script's run)
 // the page's title: "Psybeam v<version> - <server name>" (the version: the server's, filled in as it serves the page)
-const VERSION = "0.1.423";
+const VERSION = "0.1.424";
 function setTitle() {
   document.title = (VERSION.startsWith("__") ? "Psybeam" : `Psybeam v${VERSION}`) + (SERVER_NAME ? ` - ${SERVER_NAME}` : "");
 }
