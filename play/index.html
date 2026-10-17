@@ -181,7 +181,9 @@ input, select { background: var(--panel-2); border: 1px solid var(--line); borde
 .touchpad .start { flex: none; padding: 6px 12px; border-radius: 14px; font-size: 11px; font-weight: 700; letter-spacing: .08em; touch-action: none; }
 #worldScreen { display: block; width: 240px; height: 160px; margin: 0 auto; image-rendering: pixelated; background: #000; outline: none; touch-action: none; }
 #worldScreen:focus-visible { box-shadow: 0 0 0 2px var(--accent); }
-#pid { position: fixed; right: 10px; bottom: 6px; font-size: 10px; color: var(--muted); font-family: var(--mono); pointer-events: none; }
+#pid, #ver { position: fixed; bottom: 6px; font-size: 10px; color: var(--muted); font-family: var(--mono); pointer-events: none; }
+#pid { right: 10px; } #ver { left: 10px; }
+#ver.stale #verNum { color: var(--bad); }
 </style>
 <link rel="manifest" href="../manifest.webmanifest">
 <link rel="icon" href="../icon-192.png">
@@ -278,6 +280,7 @@ input, select { background: var(--panel-2); border: 1px solid var(--line); borde
   </div>
 </main>
 <div id="pid"></div>
+<div id="ver"><span id="verNum"></span><span id="verNote"></span></div>
 <dialog id="controls" aria-labelledby="controlsTitle">
   <h2 id="controlsTitle">Controls</h2>
   <p class="sub">Click the game first, so it has the keys. On a touch screen, use the buttons under it.</p>
@@ -340,8 +343,8 @@ function send(msg) {
     ws.send(JSON.stringify(msg));
   });
 }
-// what this copy of the page speaks; the server turns away a copy that speaks something else (bumped when a
-// change to the messages would break older copies)
+// what this copy of the page speaks (bumped by hand, with the server's, when a change needs the other side to have
+// it too): a server behind it turns it away; one ahead of it tells it to reload. Builds otherwise get along
 const PROTOCOL = 2;
 // the server to join: an invite (psybeam/invite.py), from this page's link (#s=…), else the one last joined in this
 // browser. It's all the page needs to reach the server straight (WebRTC): its address, its UDP port and its
@@ -431,7 +434,12 @@ function toggleHelp() { SHOW_HELP = !SHOW_HELP; store.set(HELP_KEY, SHOW_HELP ? 
 let SERVER_NAME = store.get(NAME_KEY) || "";
 setTimeout(() => setTitle());  // (once the rest of this script's run)
 // the page's title: "Psybeam v<version> - <server name>" (the version: the server's, filled in as it serves the page)
-const VERSION = "0.1.452";
+const VERSION = "0.1.460";
+if (!VERSION.startsWith("__")) $("#verNum").textContent = "v" + VERSION;  // (bottom left, as the player's id is bottom right)
+function markStale(stale, note = "Reload the app to update") {  // this page's PROTOCOL isn't the server's: red,
+  $("#ver").classList.toggle("stale", stale);                       // with how to fix it
+  $("#verNote").textContent = stale ? " " + note : "";
+}
 function setTitle() {
   document.title = (VERSION.startsWith("__") ? "Psybeam" : `Psybeam v${VERSION}`) + (SERVER_NAME ? ` - ${SERVER_NAME}` : "");
 }
@@ -643,11 +651,12 @@ function checkBuild(builds) {
 async function hello(args) {
   try {
     // (with the passcode this browser has, if any: a browser without the character's own is sent it)
-    const r = await send(Object.assign({type: "hello", protocol: PROTOCOL, passcode: PASSCODE}, args));
+    const r = await send(Object.assign({type: "hello", protocol: PROTOCOL, passcode: PASSCODE, version: VERSION.startsWith("__") ? null : VERSION}, args));
     await setFilesKey(r.files_key);
     LOGGED_IN = true;
     LOGIN_WAITERS.splice(0).forEach(go => go());
     checkBuild(r.builds);
+    markStale(false);
     if (r.token) store.set(TOKEN_KEY, r.token);
     if (r.passcode) { PASSCODE = r.passcode; store.set(PASSCODE_KEY, PASSCODE); }  // (yours, never sent before: kept here)
     if (r.game) GAME = r.game;
@@ -664,8 +673,17 @@ async function hello(args) {
     if (/unknown token/.test(e.message)) store.del(TOKEN_KEY);  // (gone: its character deleted, its players reset)
     if (/shut your group out/.test(e.message)) { store.del(TOKEN_KEY); forgetPasscode(); notice("The host has shut your group out of this server.", true); }
     if (/passcode is needed/.test(e.message)) forgetPasscode();  // (none, or it was revoked: the Waiting Room)
-    if (/version of Psybeam/.test(e.message))
-      notice("This server runs a different version of Psybeam than this page. Reload the page; if it still says so, the server needs updating.", true);
+    const newer = /page \(Psybeam v([^)]*)\) is newer than this server \(v([\d.]+)\)/.exec(e.message);
+    if (newer) {  // (turned away: an older server may not understand this page)
+      markStale(true, "The server needs updating");
+      notice(`This app is Psybeam v${newer[1]}, but the Psybeam Server you're attempting to connect to is still on ` +
+             `v${newer[2]}. The old server version is missing some newer functionality required by this app. ` +
+             "Ask the host to update Psybeam, then reload.", true);
+    }
+    if (/version of Psybeam/.test(e.message)) {
+      markStale(true);
+      notice("This server runs a newer version of Psybeam than this app. Reload the app to update.", true);
+    }
     if (!args.name || !PASSCODE) { $("#create").hidden = true; showLogin(); }  // (didn't work: the choices again)
     return e.message.replace(/^\w+Error: /, "");
   }
