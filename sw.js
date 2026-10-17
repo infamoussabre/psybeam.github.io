@@ -20,7 +20,8 @@ self.addEventListener("fetch", e => {
   if (e.request.method !== "GET" || url.origin !== location.origin) return;
   e.respondWith((async () => {
     const cache = await caches.open(CACHE);
-    const fresh = fetch(e.request).then(r => {
+    // (asking the site every time: its pages may be kept 10 minutes, and a new build mustn't wait on that)
+    const fresh = fetch(url.href, {cache: "no-cache"}).then(r => {
       if (r.ok) cache.put(e.request, r.clone()).catch(() => {});
       return r;
     });
