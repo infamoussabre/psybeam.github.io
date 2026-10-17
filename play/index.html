@@ -431,7 +431,7 @@ function toggleHelp() { SHOW_HELP = !SHOW_HELP; store.set(HELP_KEY, SHOW_HELP ? 
 let SERVER_NAME = store.get(NAME_KEY) || "";
 setTimeout(() => setTitle());  // (once the rest of this script's run)
 // the page's title: "Psybeam v<version> - <server name>" (the version: the server's, filled in as it serves the page)
-const VERSION = "0.1.446";
+const VERSION = "0.1.451";
 function setTitle() {
   document.title = (VERSION.startsWith("__") ? "Psybeam" : `Psybeam v${VERSION}`) + (SERVER_NAME ? ` - ${SERVER_NAME}` : "");
 }
@@ -688,6 +688,7 @@ function handlePush(m) {
     return;
   }
   if (m.type === "spotted") { spotted(m); return; }
+  if (m.type === "ahead") { aheadGot(m); return; }
   if (m.type === "poison") { poisoned(m); return; }
   if (m.type === "grow_ready") { WORLD.growLeft = m.left; return; }  // (an admin's level-up: played out once you're free)
   if (m.type === "rush") {  // (the other's been at the menu a while)
@@ -3835,6 +3836,7 @@ function showBattle(on) {
   if (!on) {
     $("#battleMeta").textContent = "";
     if (WORLD.started) send({type: "left_battle"}).catch(() => {});  // (until then, no one can battle you)
+    if (WORLD.ahead) WORLD.ahead.stale = true;  // (who's beaten, and the wild Pokémon ahead, have changed)
     if (WORLD.started && had) $("#worldScreen").focus({preventScroll: true});
   } else {
     fitScreen();
@@ -4375,6 +4377,10 @@ const WORLD = {cache: {}, sprites: {}, infos: {}, cur: null, placed: [], cam: {x
                escTiles: {},  // map id -> {"x,y": metatile}: escalator steps not as the map has them
                emote: null,  // the "!" over a trainer who's seen you: {n, start}
                approached: null,  // that trainer, come over to you: {n, home: where they stood}
+               ahead: null,  // what the server says is ahead of you (aheadGot): where a step would start something
+               aheadSteps: [],  // your steps since onto blocks that roll for a wild Pokémon: [{id (the step's message), key}]
+               grounds: {},  // "map|surfing" -> those blocks, by metatile, a list per ground the server rolls on alike
+               hold: null,  // a step that might start something: {id, until}; no more till the server's checked it
                npcLive: {}}; // map id -> {local id: {x, y, facing}}: NPCs where the main player's game has them
 const FRAME_MS = 1000 / 59.7275;
 const FACE_FRAME = {south: 0, north: 1, west: 2, east: 2};
@@ -6063,7 +6069,9 @@ function worldTick(now) {
   if (WORLD.startPending && !WORLD.start && me && !moving(me, now)) { WORLD.startPending = false; startOpen(); }  // (after the step)
   sayNext();  // (what the game had to tell you while you were busy)
   if (WORLD.growLeft && !WORLD.growing && canWalk() && !WORLD.waiting && !moving(me, now) && !STICK) growNext();
-  if (me && !WORLD.waiting && !WORLD.dialog && !WORLD.busy && !WORLD.start && !WORLD.shade && !WORLD.party && !me.waiting && !me.tele && !moving(me, now)) {
+  if (WORLD.hold && now > WORLD.hold.until) WORLD.hold = null;  // (never heard: on you go)
+  if (me && WORLD.started) aheadAsk(me, now);
+  if (me && !WORLD.waiting && !WORLD.hold && !WORLD.dialog && !WORLD.busy && !WORLD.start && !WORLD.shade && !WORLD.party && !me.waiting && !me.tele && !moving(me, now)) {
     const dir = WORLD.order[WORLD.order.length - 1];
     // standing still, a new direction first turns you (as in the game); already walking, you just go
     const standing = !me.anim || now - me.anim.end > 60;
@@ -6094,11 +6102,83 @@ function takeStep(me, dir, now) {
     if (guess.elevation && guess.elevation !== 15) me.layer = guess.elevation;
     animate(me, from, run ? 8 : 16, run ? "run" : "walk", now);
   } else WORLD.waiting = true;  // the server decides before anything moves
-  send({type: "step", dir, run}).then(r => settleStep(r, guess)).catch(e => { WORLD.waiting = false; log("world: " + e.message); });
+  const msg = {type: "step", dir, run};
+  send(msg).then(r => settleStep(r, guess, msg.id)).catch(e => { WORLD.waiting = false; log("world: " + e.message); });
+  if (guess) aheadStep(msg.id, guess.map, guess.x, guess.y, !!me.surfing, now);
 }
-// the server's answer to one of your steps
-async function settleStep(r, guess) {
+// ---- what's ahead: steps the server would stop (a wild Pokémon, a trainer who'd see you) ------------------
+// Steps start before the server has answered the last (takeStep), and what a step leads to is only known once it's
+// checked (after its answer). So that you don't walk on past where it happens, to be pulled back, the server tells you
+// ahead of time (netserver _ahead_view): on which of your next steps on each ground a wild Pokémon appears (it has
+// rolled them already), and where the trainers on these maps look. Stepping where something would (or might: not
+// known) happen, you stop there till that step's been checked; elsewhere, you walk on as fast as ever.
+const ROLL_KINDS = ["walk", "run", "jump", "surf", "surf_off"];  // (steps the server checks after: _after_step)
+const AHEAD_HOLD_MS = 5000;  // (the longest a stop waits for its check)
+function aheadGot(m) {
+  const a = WORLD.ahead;
+  if (a && a.after != null && m.after != null && m.after < a.after) return;  // (an older word, arriving late)
+  for (const [map, grounds] of Object.entries(m.wild || {})) WORLD.grounds[`${map}|${m.surfing ? 1 : 0}`] = grounds.map(g => g.tiles);
+  WORLD.ahead = m;
+  if (m.after != null) WORLD.aheadSteps = WORLD.aheadSteps.filter(s => s.id > m.after);
+  if (WORLD.hold && m.after != null && m.after >= WORLD.hold.id) WORLD.hold = null;
+}
+// asked for again when it's not about here (a new map, on or off the water) or out of date (a battle's over)
+function aheadAsk(me, now) {
+  const a = WORLD.ahead;
+  if (a && !a.stale && a.maps.includes(me.map) && a.surfing === !!me.surfing) return;
+  if (WORLD.aheadAsking || now < (WORLD.aheadAskAt || 0)) return;
+  WORLD.aheadAsking = true;
+  WORLD.aheadAskAt = now + 1000;  // (once a second at most: the server may have you elsewhere for a moment)
+  send({type: "ahead"}).then(aheadGot).catch(() => {}).finally(() => { WORLD.aheadAsking = false; });
+}
+// your step `id` onto (map, x, y): counted if it rolls for a wild Pokémon, and held after if something might happen there
+function aheadStep(id, map, x, y, surfing, now) {
+  const a = WORLD.ahead;
+  if (a && a.after != null && a.after >= id) return;  // (checked already)
+  const m = WORLD.loaded[map], grounds = WORLD.grounds[`${map}|${surfing ? 1 : 0}`];
+  let key = null, stop = false;
+  if (!(a && a.wild === null) && m && x >= 0 && y >= 0 && x < m.width && y < m.height) {
+    const t = m.blocks[x + y * m.width] & 0x3FF, i = grounds ? grounds.findIndex(g => g.includes(t)) : -1;
+    key = !grounds ? "?" : i >= 0 ? `${map}|${surfing ? 1 : 0}|${i}` : null;
+    if (key) {  // (the server's word holds while every step since has been on this same ground)
+      const since = WORLD.aheadSteps.filter(s => !a || a.after == null || s.id > a.after);
+      const told = a && a.surfing === surfing && a.wild && a.wild[map] && since.every(s => s.key === key) && i >= 0 ? a.wild[map][i] : null;
+      const k = since.length + 1;
+      stop = !told || (told.hit !== null ? k >= told.hit : k > a.depth);
+    }
+  }
+  if (key) WORLD.aheadSteps.push({id, key});
+  if (stop || sightStops(map, x, y)) WORLD.hold = {id, until: now + AHEAD_HOLD_MS};
+}
+// your step `id` wasn't one the server checks after: not counted, and not waited for
+function aheadUnstep(id) {
+  WORLD.aheadSteps = WORLD.aheadSteps.filter(s => s.id !== id);
+  if (WORLD.hold && WORLD.hold.id === id) WORLD.hold = null;
+}
+// would a trainer see you on (map, x, y)? Where they stand and face now (they turn), as far as the server says they see
+// (if they've moved since, as far as they ever see); a map not told of: maybe
+function sightStops(map, x, y) {
+  const a = WORLD.ahead;
+  if (a && a.trainers === null) return false;
+  const list = a && a.trainers && a.trainers[map];
+  if (!list) return true;
+  const npcs = (WORLD.loaded[map] || {}).npcs || [];
+  return list.some(t => {
+    const n = npcs.find(n => n.local_id === t.local_id), at = n || t, moved = at.x !== t.x || at.y !== t.y;
+    return (t.all ? Object.keys(STEP) : [at.facing]).some(f => {
+      const [dx, dy] = STEP[f] || [0, 0], d = (x - at.x) * dx + (y - at.y) * dy;
+      return (dx ? y === at.y : x === at.x) && d > 0 && d <= (moved ? t.sight : t.reach[f]);
+    });
+  });
+}
+// the server's answer to one of your steps (message `id`)
+async function settleStep(r, guess, id) {
   const me = WORLD.me, now = performance.now();
+  if (!ROLL_KINDS.includes(r.kind)) aheadUnstep(id);  // (no step after all, or no ordinary one: nothing's checked after it)
+  else if (!guess || guess.map !== r.map || guess.x !== r.x || guess.y !== r.y) {  // (where it took you: ledges, the next map...)
+    aheadUnstep(id);
+    aheadStep(id, r.map, r.x, r.y, r.kind !== "surf_off" && !!me.surfing, now);
+  }
   me.facing = r.facing;
   if (r.elevation != null) me.elevation = r.elevation;  // (the server's say on your height)
   if (r.layer != null) me.layer = r.layer;
