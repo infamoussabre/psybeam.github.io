@@ -431,7 +431,7 @@ function toggleHelp() { SHOW_HELP = !SHOW_HELP; store.set(HELP_KEY, SHOW_HELP ? 
 let SERVER_NAME = store.get(NAME_KEY) || "";
 setTimeout(() => setTitle());  // (once the rest of this script's run)
 // the page's title: "Psybeam v<version> - <server name>" (the version: the server's, filled in as it serves the page)
-const VERSION = "0.1.451";
+const VERSION = "0.1.452";
 function setTitle() {
   document.title = (VERSION.startsWith("__") ? "Psybeam" : `Psybeam v${VERSION}`) + (SERVER_NAME ? ` - ${SERVER_NAME}` : "");
 }
@@ -986,6 +986,7 @@ async function aiShow(action, w) {
   AI_SHOW = null;
   send({type: "ai_done", battle_id: SHOWN.id}).catch(e => log(e.message));  // (played out: now it's made)
   SHOWN = Object.assign({}, SHOWN, {waiting_for: null});  // (chosen: on with what comes, "Waiting for NAME…" till it does)
+  LAST_P = null;  // (an empty box meanwhile, not the last line again)
   pump();
 }
 const PLAY = [];
@@ -3886,7 +3887,7 @@ function renderBattle() {
     // (chosen already: a second press on the menu still up mustn't answer the next decision too)
     if (!SHOWN || SHOWN.id !== BATTLE.id || !SHOWN.waiting_for) return;
     const asked = SHOWN, sent = SHOWN = Object.assign({}, asked, {waiting_for: null});  // (the menu goes, till what comes)
-    MENU = "main"; renderBattle();
+    MENU = "main"; LAST_P = null; renderBattle();  // (an empty box till the turn's first line, not the last one again)
     send({type: "act", battle_id: BATTLE.id, action}).catch(e => {
       log(e.message);
       if (SHOWN === sent) { SHOWN = asked; renderBattle(); }  // (not taken: choose again)
@@ -3939,7 +3940,7 @@ function renderBattle() {
     const rules = textRules(BATTLE), blank = !LAST_P || LAST_P.p.lines.every(l => !l);
     // the other player's game goes on with lines you don't see (their EXP...) after the box was cleared: who
     // it's waiting on, rather than an empty box (past the first menu: before, the box shows their game's)
-    const theirs = blank && FOLLOWED[BATTLE.id] && rules.mode !== "follow";
+    const theirs = blank && FOLLOWED[BATTLE.id] && rules.mode !== "follow" && CHOSEN !== BATTLE.id;  // (chosen: `waiting`'s)
     // (chosen after the other side had: nothing to wait for, the turn's coming)
     const waiting = CHOSEN === BATTLE.id && !BATTLE.other_chose;
     if ((waiting || theirs) && !done && rules.opponent) standby(BATTLE);
