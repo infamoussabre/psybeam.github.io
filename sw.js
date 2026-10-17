@@ -2,8 +2,8 @@
 // Each is fetched fresh when the site answers (so a new build reaches everyone), and served from here when it
 // doesn't (down, or no network), so invite links and QR codes still open the game. The game itself never comes
 // from here: it talks straight to the host's server, and keeps the host's files in a cache of its own
-// ("psybeam-files"), which this leaves alone.
-const CACHE = "psybeam-site-0.1.440-3d3a602928";
+// ("psybeam-files-sealed"), which this leaves alone.
+const CACHE = "psybeam-site-0.1.441-ff3dbbe2aa";
 const SHELL = ["./", "play/", "manifest.webmanifest", "icon-180.png", "icon-192.png", "icon-512.png"];
 const WAIT_MS = 4000;  // (the site this slow: the kept copy, rather than waiting on)
 

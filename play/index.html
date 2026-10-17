@@ -431,7 +431,7 @@ function toggleHelp() { SHOW_HELP = !SHOW_HELP; store.set(HELP_KEY, SHOW_HELP ? 
 let SERVER_NAME = store.get(NAME_KEY) || "";
 setTimeout(() => setTitle());  // (once the rest of this script's run)
 // the page's title: "Psybeam v<version> - <server name>" (the version: the server's, filled in as it serves the page)
-const VERSION = "0.1.440";
+const VERSION = "0.1.441";
 function setTitle() {
   document.title = (VERSION.startsWith("__") ? "Psybeam" : `Psybeam v${VERSION}`) + (SERVER_NAME ? ` - ${SERVER_NAME}` : "");
 }
@@ -567,7 +567,26 @@ function connect() {
 // ?v=), for as long as HTTP's caching kept them: the server's own images an hour, the rest a day, and what it says
 // not to keep (or asked for with {cache: "no-cache"}) never.
 const FILE_WAIT = 20000;
-const FILE_CACHE = (async () => { try { return window.caches ? await caches.open("psybeam-files") : null; } catch (e) { return null; } })();
+// (kept sealed, as they came: "psybeam-files" was the plain copies of before, deleted)
+const FILE_CACHE = (async () => { try { if (!window.caches) return null; caches.delete("psybeam-files").catch(() => {}); return await caches.open("psybeam-files-sealed"); } catch (e) { return null; } })();
+// the server's files come sealed (Hub.files_sealed): encrypted with its files key (the welcome's, or the New Player
+// card's), gzipped inside but for PNGs. Opened only as they're handed to the page
+let FILES_KEY = null;  // {id, key: a CryptoKey}
+const KEY_WAITERS = [];
+async function setFilesKey(k) {
+  if (!k || (FILES_KEY && FILES_KEY.id === k.id)) return;
+  const raw = Uint8Array.from(atob(k.key), c => c.charCodeAt(0));
+  FILES_KEY = {id: k.id, key: await crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["decrypt"])};
+  KEY_WAITERS.splice(0).forEach(go => go());
+}
+async function unseal(body, keyId, gzipped) {  // (null: sealed with another key than the server's now)
+  if (!FILES_KEY) await new Promise(r => KEY_WAITERS.push(r));
+  if (keyId !== FILES_KEY.id) return null;
+  body = new Uint8Array(body);
+  let out = await crypto.subtle.decrypt({name: "AES-GCM", iv: body.subarray(0, 12)}, FILES_KEY.key, body.subarray(12));
+  if (gzipped) out = await new Response(new Blob([out]).stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer();
+  return out;
+}
 function fileReply(whole) {
   const nl = whole.indexOf(10), head = JSON.parse(new TextDecoder().decode(whole.subarray(1, nl)));
   const p = pending[head.id];
@@ -578,7 +597,10 @@ async function serverFetch(path, opts = {}) {
   const keep = (path.startsWith("/sprites/") ? 3600 : 86400) * 1000;
   if (cache && opts.cache !== "no-cache") {
     const hit = await cache.match(key).catch(() => null);
-    if (hit && Date.now() - Number(hit.headers.get("X-Kept")) < keep) return hit;
+    if (hit && Date.now() - Number(hit.headers.get("X-Kept")) < keep) {
+      const body = await unseal(await hit.arrayBuffer(), hit.headers.get("X-Key"), hit.headers.get("X-Gzip") === "1").catch(() => null);
+      if (body) return new Response(body, {headers: {"Content-Type": hit.headers.get("Content-Type")}});
+    }
   }
   for (let tries = 0, waits = 0; ; ) {
     await CHANNEL_OPEN;
@@ -594,11 +616,11 @@ async function serverFetch(path, opts = {}) {
     try {
       const r = await Promise.race([send({type: "file", path}),
                                     new Promise((_, no) => setTimeout(() => no(new Error("timed out")), FILE_WAIT))]);
-      let body = r.body;
-      if (r.head.gzip) body = await new Response(new Blob([body]).stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer();
-      const headers = {"Content-Type": r.head.kind, "X-Kept": String(Date.now())};
-      if (cache && r.head.cache) cache.put(key, new Response(body, {headers})).catch(() => {});
-      return new Response(body, {headers});
+      if (cache && r.head.cache) cache.put(key, new Response(r.body, {headers: {"Content-Type": r.head.kind, "X-Kept": String(Date.now()),
+                                                                     "X-Key": r.head.key, "X-Gzip": r.head.gzip ? "1" : "0"}})).catch(() => {});
+      const body = await unseal(r.body, r.head.key, r.head.gzip);
+      if (!body) return new Response("sealed with another key", {status: 503});
+      return new Response(body, {headers: {"Content-Type": r.head.kind}});
     } catch (e) {
       if (/^KeyError/.test(e.message)) return new Response(e.message, {status: 404});
       if (++tries > 2) return new Response(e.message, {status: 503});  // (the connection's trouble: tried again, first)
@@ -622,6 +644,7 @@ async function hello(args) {
   try {
     // (with the passcode this browser has, if any: a browser without the character's own is sent it)
     const r = await send(Object.assign({type: "hello", protocol: PROTOCOL, passcode: PASSCODE}, args));
+    await setFilesKey(r.files_key);
     LOGGED_IN = true;
     LOGIN_WAITERS.splice(0).forEach(go => go());
     checkBuild(r.builds);
@@ -4027,7 +4050,8 @@ let NEW_OPTIONS = null;
 const CREATE = {outfit: 0, starter: 0};  // (which of NEW_OPTIONS' outfits and starters is showing)
 $("#newBtn").onclick = () => newPlayer("");
 async function newPlayer(name) {
-  try { NEW_OPTIONS = NEW_OPTIONS || await send({type: "new_player_options"}); } catch (e) { $("#loginHelp").textContent = e.message; return; }
+  try { NEW_OPTIONS = NEW_OPTIONS || await send({type: "new_player_options", passcode: PASSCODE});
+  await setFilesKey(NEW_OPTIONS.files_key); } catch (e) { $("#loginHelp").textContent = e.message; return; }
   // (each starts on one picked at random)
   CREATE.outfit = Math.floor(Math.random() * NEW_OPTIONS.outfits.length);
   CREATE.starter = Math.floor(Math.random() * NEW_OPTIONS.starters.length);
