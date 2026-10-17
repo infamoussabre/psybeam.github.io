@@ -431,7 +431,7 @@ function toggleHelp() { SHOW_HELP = !SHOW_HELP; store.set(HELP_KEY, SHOW_HELP ? 
 let SERVER_NAME = store.get(NAME_KEY) || "";
 setTimeout(() => setTitle());  // (once the rest of this script's run)
 // the page's title: "Psybeam v<version> - <server name>" (the version: the server's, filled in as it serves the page)
-const VERSION = "0.1.441";
+const VERSION = "0.1.444";
 function setTitle() {
   document.title = (VERSION.startsWith("__") ? "Psybeam" : `Psybeam v${VERSION}`) + (SERVER_NAME ? ` - ${SERVER_NAME}` : "");
 }
@@ -1562,7 +1562,8 @@ function sfx(name) {
 function sfxStop(src) { if (src) try { src.stop(); } catch (e) {} }
 // a song the game's scripts play, by its label (se_select, mus_obtain_item...): ours by that name, if we have it
 function sfxSong(label) { const name = SFX.index && SFX.index.songs[label]; return name ? sfx(name) : null; }
-for (const ev of ["pointerdown", "keydown"]) document.addEventListener(ev, sfxStart, true);
+// (a phone's browser lets sound start only as a touch is let go, not as it's pressed: pointerup, touchend, click)
+for (const ev of ["pointerdown", "pointerup", "touchend", "click", "keydown"]) document.addEventListener(ev, sfxStart, true);
 function soundButton() {
   const b = $("#soundBtn");
   b.textContent = SFX.on ? "Sound: on" : "Sound: off";
