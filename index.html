@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Psybeam</title>
+<script>
+// an invite (#s=…, a login link's #s=…&login=…, a friend's #s=…&p=…): straight into the game client, with it
+if (/(?:^#|&)(?:s|login)=/.test(location.hash)) location.replace("play/" + location.hash);
+</script>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-180.png">
+<meta name="theme-color" content="#c8402f">
+<meta name="description" content="Play Pokémon FireRed together: one player hosts, friends join their world as guests.">
+<style>
+:root {
+  --bg: #f4f2ee; --panel: #ffffff; --ink: #1d1c1a; --muted: #6b6760; --line: #e3e0d9;
+  --accent: #c8402f; --accent-ink: #fff; --go: #2563b8; --go-ink: #fff;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #161514; --panel: #201f1d; --ink: #ecebe8; --muted: #9c978e; --line: #34312d;
+    --accent: #e0604c; --accent-ink: #1b0f0d; --go: #4a8be0; --go-ink: #0b1626;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 760px; margin: 0 auto; padding: 32px 16px 48px; }
+header { display: flex; align-items: center; gap: 14px; margin-bottom: 28px; }
+header img { width: 56px; height: 56px; border-radius: 12px; image-rendering: pixelated; }
+h1 { font-size: 28px; margin: 0; letter-spacing: -0.01em; }
+h2 { font-size: 18px; margin: 0 0 8px; }
+p { margin: 0 0 12px; }
+.lead { font-size: 19px; color: var(--ink); margin-bottom: 28px; }
+.muted { color: var(--muted); }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+.button { display: inline-block; padding: 10px 16px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel);
+  color: inherit; font: inherit; font-weight: 600; text-decoration: none; cursor: pointer; }
+.button.go { background: var(--go); border-color: var(--go); color: var(--go-ink); }
+.button.accent { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 14px; }
+ol { margin: 8px 0 0; padding-left: 22px; }
+li { margin-bottom: 6px; }
+footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <img src="icon-192.png" alt="">
+    <h1>Psybeam</h1>
+  </header>
+  <p class="lead">Play Pokémon FireRed together. One player runs the real game; friends join their world as guests,
+    walking it with them, talking to its people, and battling each other and the host.</p>
+
+  <section class="card">
+    <h2>Join a game</h2>
+    <p>Open the invite link or QR code the host sent you: that's all. Your browser connects straight to their game.</p>
+    <p class="muted">New guests wait in the host's Waiting Room until they're let in, unless a friend's invite brought them.</p>
+    <div class="row"><a class="button go" href="play/">Open the game</a></div>
+  </section>
+
+  <section class="card">
+    <h2>Host a game</h2>
+    <p>Psybeam runs on your Mac (Apple Silicon, macOS 14 or later) with your own copy of Pokémon FireRed
+      (USA, Europe) (Rev 1).</p>
+    <ol>
+      <li>Download Psybeam, unzip it, and move it to Applications.</li>
+      <li>Open it. The first time, macOS can't check it: open <b>System Settings → Privacy &amp; Security</b> and click
+        <b>Open Anyway</b>.</li>
+      <li>Add your ROM on its Home tab, then share its invite link or QR code.</li>
+    </ol>
+    <div class="row"><a class="button accent" href="Psybeam-mac.zip" download>Download Psybeam for Mac</a></div>
+  </section>
+
+  <section class="card">
+    <h2>Keep it on your device</h2>
+    <p>Once you've opened the game here, your browser keeps it: invite links and QR codes still open it if this site
+      ever can't be reached. You can also install it as an app.</p>
+    <p class="muted" id="installHow">In your browser's menu, look for <b>Install</b> or <b>Add to Home Screen</b>.</p>
+    <div class="row" id="installRow" hidden><button class="button" id="installBtn">Install the game</button></div>
+  </section>
+
+  <footer>Psybeam isn't affiliated with Nintendo, Game Freak or Creatures, and ships none of their work: Pokémon is
+    theirs.</footer>
+</main>
+<script>
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+// installing it as an app: the browser's own prompt where it offers one (Chrome, Edge, Android)
+let installPrompt = null;
+addEventListener("beforeinstallprompt", e => {
+  e.preventDefault();
+  installPrompt = e;
+  document.getElementById("installRow").hidden = false;
+});
+document.getElementById("installBtn").onclick = async () => {
+  if (!installPrompt) return;
+  installPrompt.prompt();
+  await installPrompt.userChoice;
+  installPrompt = null;
+  document.getElementById("installRow").hidden = true;
+};
+if (/iPhone|iPad|iPod/.test(navigator.userAgent))
+  document.getElementById("installHow").innerHTML = "On iPhone or iPad: tap <b>Share</b>, then <b>Add to Home Screen</b>.";
+</script>
+</body>
+</html>
