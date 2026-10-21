@@ -439,12 +439,31 @@ function toggleHelp() { SHOW_HELP = !SHOW_HELP; store.set(HELP_KEY, SHOW_HELP ? 
 let SERVER_NAME = store.get(NAME_KEY) || "";
 setTimeout(() => setTitle());  // (once the rest of this script's run)
 // the page's title: "Psybeam v<version> - <server name>" (the version: the server's, filled in as it serves the page)
-const VERSION = "0.1.473";
+const VERSION = "0.1.474";
 if (!VERSION.startsWith("__")) $("#verNum").textContent = "v" + VERSION;  // (bottom left, as the player's id is bottom right)
 function markStale(stale, note = "Reload the app to update") {  // this page's PROTOCOL isn't the server's: red,
   $("#ver").classList.toggle("stale", stale);                       // with how to fix it
   $("#verNote").textContent = stale ? " " + note : "";
 }
+// a newer build of the site's page (its version.json, published with it): said, with a Reload button, as the page
+// opens, when it's brought back to the front (a home-screen app may stay open for days), and every 15 minutes.
+// Only the site's page (the one with a manifest): the server's own copy is this machine's, for testing
+function siteUpdates() {
+  if (VERSION.startsWith("__") || !document.querySelector('link[rel="manifest"]')) return;
+  const num = v => String(v).split(".").map(Number), newer = (a, b) => {
+    const [x, y] = [num(a), num(b)];
+    for (let i = 0; i < Math.max(x.length, y.length); i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0);
+    return false;
+  };
+  const check = () => fetch("../version.json", {cache: "no-store"}).then(r => r.ok ? r.json() : null).then(d => {
+    if (!d || !newer(d.version, VERSION) || $("#notice").className === "bad") return;  // (a problem's said first)
+    notice(`Psybeam v${esc(d.version)} is available.`, false, true);
+  }).catch(() => {});
+  setTimeout(check, 5000);
+  setInterval(check, 15 * 60 * 1000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) check(); });
+}
+siteUpdates();
 function setTitle() {
   document.title = (VERSION.startsWith("__") ? "Psybeam" : `Psybeam v${VERSION}`) + (SERVER_NAME ? ` - ${SERVER_NAME}` : "");
 }
