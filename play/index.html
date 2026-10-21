@@ -444,7 +444,7 @@ function toggleHelp() { SHOW_HELP = !SHOW_HELP; store.set(HELP_KEY, SHOW_HELP ? 
 let SERVER_NAME = store.get(NAME_KEY) || "";
 setTimeout(() => setTitle());  // (once the rest of this script's run)
 // the page's title: "Psybeam v<version> - <server name>" (the version: the server's, filled in as it serves the page)
-const VERSION = "0.1.493";
+const VERSION = "0.1.494";
 if (!VERSION.startsWith("__")) $("#verNum").textContent = "v" + VERSION;  // (bottom left, as the player's id is bottom right)
 function markStale(stale, note = "Reload the app to update") {  // this page's PROTOCOL isn't the server's: red,
   $("#ver").classList.toggle("stale", stale);                       // with how to fix it
@@ -4492,7 +4492,9 @@ const WORLD = {cache: {}, sprites: {}, infos: {}, cur: null, placed: [], cam: {x
                aheadSteps: [],  // your steps since onto blocks that roll for a wild Pokémon: [{id (the step's message), key}]
                grounds: {},  // "map|surfing" -> those blocks, by metatile, a list per ground the server rolls on alike
                hold: null,  // a step that might start something: {id, until}; no more till the server's checked it
-               npcLive: {}}; // map id -> {local id: {x, y, facing}}: NPCs where the main player's game has them
+               npcLive: {},  // map id -> {local id: {x, y, facing}}: NPCs where the main player's game has them
+               inflight: new Set(),  // your steps sent and not yet answered (message ids)
+               resync: false}; // the server took one of them otherwise: no more till they're all answered (settleStep)
 const FRAME_MS = 1000 / 59.7275;
 const FACE_FRAME = {south: 0, north: 1, west: 2, east: 2};
 const CONNECT = {north: (c, m) => [c.offset, -m.height], south: (c, m, cur) => [c.offset, cur.height],
@@ -6295,7 +6297,7 @@ function worldTick(now) {
   if (WORLD.hold && now > WORLD.hold.until) WORLD.hold = null;  // (never heard: on you go)
   if (me && WORLD.started) aheadAsk(me, now);
   if (WORLD.encounter && !WORLD.encounter.started && me && !moving(me, now) && !TRANSITION && !SHOWN) encounterStart(now);
-  if (me && !WORLD.waiting && !WORLD.hold && !WORLD.dialog && !WORLD.busy && !WORLD.start && !WORLD.shade && !WORLD.party && !me.waiting && !me.tele && !moving(me, now)) {
+  if (me && !WORLD.waiting && !WORLD.resync && !WORLD.hold && !WORLD.dialog && !WORLD.busy && !WORLD.start && !WORLD.shade && !WORLD.party && !me.waiting && !me.tele && !moving(me, now)) {
     const dir = WORLD.order[WORLD.order.length - 1];
     // standing still, a new direction first turns you (as in the game); already walking, you just go
     const standing = !me.anim || now - me.anim.end > 60;
@@ -6321,6 +6323,7 @@ function takeStep(me, dir, now) {
   }
   const msg = {type: "step", dir, run};
   const reply = send(msg);
+  WORLD.inflight.add(msg.id);
   if (guess && guess.kind === "warp") {  // through a warp: the door opens, you go in, the screen fades, while the
     WORLD.waiting = msg.id;              //  server says where you come out (only needed once it's black)
     mapAround(guess.warp.map).catch(() => {});  // (the map there: as it is now)
@@ -6337,7 +6340,12 @@ function takeStep(me, dir, now) {
   } else { WORLD.waiting = msg.id; waitingOn(reply); }  // the server decides before anything moves
   // (WORLD.waiting: the step it's waiting on, and only that one's answer ends the wait: the answer to a step before
   // it, still on its way, doesn't let another go meanwhile)
-  reply.then(r => settleStep(r, guess, msg.id)).catch(e => { if (WORLD.waiting === msg.id) WORLD.waiting = false; log("world: " + e.message); });
+  reply.then(r => settleStep(r, guess, msg.id)).catch(e => {
+    WORLD.inflight.delete(msg.id);
+    if (!WORLD.inflight.size) WORLD.resync = false;
+    if (WORLD.waiting === msg.id) WORLD.waiting = false;
+    log("world: " + e.message);
+  });
   if (guess && guess.kind !== "warp") aheadStep(msg.id, guess.map, guess.x, guess.y, !!me.surfing, now);
 }
 // going through a warp, up to the screen gone black: into the door (it opens, you step in, it shuts), or onto the
@@ -6467,6 +6475,12 @@ function sightStops(map, x, y) {
 // the server's answer to one of your steps (message `id`)
 async function settleStep(r, guess, id) {
   const me = WORLD.me, now = performance.now();
+  WORLD.inflight.delete(id);
+  // the server didn't take the step as this page did: the steps after it, sent meanwhile, went from where this page
+  // thought you were. No more go till they're all answered (each brings you to where the server has you), then on
+  // from there: else every step after would be guessed from the wrong block, and you'd be pulled back again and again
+  if (guess && typeof guess === "object" && (guess.kind === "warp" ? r.kind !== "warp" : guess.map !== r.map || guess.x !== r.x || guess.y !== r.y))
+    WORLD.resync = true;
   if (!ROLL_KINDS.includes(r.kind)) aheadUnstep(id);  // (no step after all, or no ordinary one: nothing's checked after it)
   else if (!guess || guess.map !== r.map || guess.x !== r.x || guess.y !== r.y) {  // (where it took you: ledges, the next map...)
     aheadUnstep(id);
@@ -6545,6 +6559,7 @@ async function settleStep(r, guess, id) {
   }
   if (me.map !== WORLD.cur.id) await enterMap(me.map);
   if (WORLD.waiting === id) WORLD.waiting = false;
+  if (WORLD.resync && !WORLD.inflight.size) WORLD.resync = false;
   showWorldInfo();
   if (r.guard) gateGuard(r.guard);
   else if (r.push) keptOut(r);
