@@ -439,7 +439,7 @@ function toggleHelp() { SHOW_HELP = !SHOW_HELP; store.set(HELP_KEY, SHOW_HELP ? 
 let SERVER_NAME = store.get(NAME_KEY) || "";
 setTimeout(() => setTitle());  // (once the rest of this script's run)
 // the page's title: "Psybeam v<version> - <server name>" (the version: the server's, filled in as it serves the page)
-const VERSION = "0.1.474";
+const VERSION = "0.1.479";
 if (!VERSION.startsWith("__")) $("#verNum").textContent = "v" + VERSION;  // (bottom left, as the player's id is bottom right)
 function markStale(stale, note = "Reload the app to update") {  // this page's PROTOCOL isn't the server's: red,
   $("#ver").classList.toggle("stale", stale);                       // with how to fix it
@@ -4460,6 +4460,7 @@ const WORLD = {cache: {}, sprites: {}, infos: {}, cur: null, placed: [], cam: {x
                loaded: {},   // map id -> map, once loaded
                field: {},    // map id -> what field moves changed there (fieldPush)
                anims: {},    // tileset key -> its animated tiles (promise)
+               sheets: {},   // tileset key -> its pictures (promise)
                dialog: null, // a text box open: {pages, page, start, npc, faced}
                doors: [],    // doors opening, open or closing: {map, x, y, size, key, open, start}
                grass: new Map(),  // tall grass covering someone: "map|x|y" -> {map, x, y, start}
@@ -4485,12 +4486,14 @@ function blockLayer(sheet, blocks, w, h) {  // a whole map's layer, drawn once
   blocks.forEach((b, i) => { const t = b & 0x3FF; g.drawImage(sheet, (t % 32) * 16, (t >> 5) * 16, 16, 16, (i % w) * 16, Math.floor(i / w) * 16, 16, 16); });
   return c;
 }
+const mapJson = id => serverFetch(`/world/map/${id}.json?v=${WORLD_DATA}`).then(r => r.ok ? r.json() : Promise.reject(new Error(`map ${id}: ${r.status}`)));
+// what a map's drawn with: its tileset, animated tiles and characters' sprites, all asked for at once
+const mapArt = m => Promise.all([tilesetSheets(m.tileset), tilesetAnims(m.tileset), Promise.all(Object.keys(m.sprites).map(g => spriteImage(g)))]);
 function worldMap(id) {
   if (!WORLD.cache[id]) WORLD.cache[id] = (async () => {
-    const m = await (await serverFetch(`/world/map/${id}.json?v=${WORLD_DATA}`)).json();
-    m.sheets = await Promise.all(["below", "above"].map(l => loadImage(`/world/tileset/${m.tileset}-${l}.png`)));
+    const m = await mapJson(id);
+    [m.sheets, m.anim] = await mapArt(m);
     m.layers = m.sheets.map(s => blockLayer(s, m.blocks, m.width, m.height));
-    m.anim = await tilesetAnims(m.tileset);
     if (m.anim) {  // which blocks animate: spots[anim] = [[x, y, k (the metatile's place in that anim's sheet)]]
       m.animSpots = m.anim.info.anims.map(a => {
         const at = new Map(a.metatiles.map((t, k) => [t, k])), spots = [];
@@ -4498,24 +4501,58 @@ function worldMap(id) {
         return spots;
       });
     }
-    await Promise.all(Object.keys(m.sprites).map(g => spriteImage(g)));
     for (const n of m.npcs) { n.map = m.id; n.home = {x: n.x, y: n.y, facing: n.facing}; }
     WORLD.loaded[id] = m;
     fieldLoaded(m);  // (as field moves have left it)
     moveNpcs(m, Object.values(WORLD.npcLive[id] || {}), false);  // where the main game has them now
     return m;
   })();
+  WORLD.cache[id].catch(() => { delete WORLD.cache[id]; });  // (it didn't come: asked for again next time)
   return WORLD.cache[id];
 }
-// a tileset's animated tiles (water, flowers, fountains): {info, sheets: [below, above]} or null
+// a map and the maps joined to its edges, all asked for at once: [map, its neighbours as placed]
+async function mapAround(id) {
+  const m = await worldMap(id);
+  const joined = m.connections.filter(c => CONNECT[c.direction]);
+  const near = await Promise.all(joined.map(c => worldMap(c.map)));
+  return [m, joined.map((c, i) => { const [x, y] = CONNECT[c.direction](c, near[i], m); return {m: near[i], x, y}; })];
+}
+// a tileset's pictures: [below, above]
+function tilesetSheets(key) {
+  if (!WORLD.sheets[key]) {
+    WORLD.sheets[key] = Promise.all(["below", "above"].map(l => loadImage(`/world/tileset/${key}-${l}.png`)));
+    WORLD.sheets[key].catch(() => { delete WORLD.sheets[key]; });
+  }
+  return WORLD.sheets[key];
+}
+// a tileset's animated tiles (water, flowers, fountains): {info, sheets: [below, above]} or null. Its pictures are
+// asked for alongside what it has (a tileset with none: they're not there, and not needed)
 function tilesetAnims(key) {
-  if (!WORLD.anims[key]) WORLD.anims[key] = (async () => {
-    const info = await (await serverFetch(`/world/tileset/${key}-anim.json`)).json();
-    if (!info.anims.length) return null;
-    const sheets = await Promise.all(["below", "above"].map(l => loadImage(`/world/tileset/${key}-anim-${l}.png`)));
-    return {info, sheets};
-  })();
+  if (!WORLD.anims[key]) {
+    WORLD.anims[key] = (async () => {
+      const pics = Promise.all(["below", "above"].map(l => loadImage(`/world/tileset/${key}-anim-${l}.png`)));
+      pics.catch(() => {});
+      const r = await serverFetch(`/world/tileset/${key}-anim.json`);
+      if (!r.ok) throw new Error(`tileset ${key}: ${r.status}`);
+      const info = await r.json();
+      if (!info.anims.length) return null;
+      return {info, sheets: await pics};
+    })();
+    WORLD.anims[key].catch(() => { delete WORLD.anims[key]; });
+  }
   return WORLD.anims[key];
+}
+// Once you're on a map, what's next is fetched while you stand there: through its doors and warps, the art of
+// where they go (the map itself is asked for as you go through: it's as the game has it then); past its edges,
+// the maps beyond the ones joined to it, whole (as those are), so walking on from one never waits
+function prefetchAround(m) {
+  const later = () => {
+    if (WORLD.cur !== m) return;  // (gone on already)
+    for (const id of new Set(m.warps.map(w => w.map)))
+      if (!WORLD.cache[id]) mapJson(id).then(mapArt).catch(() => {});
+    for (const c of m.connections) if (CONNECT[c.direction]) mapAround(c.map).catch(() => {});
+  };
+  setTimeout(later, 500);  // (after what's on screen has what it needs)
 }
 // draw the current frame of the animated blocks in view, over a layer (0 below characters, 1 above)
 function drawAnims(g, layer, left, top, now, w = 240, h = 160) {
@@ -4552,19 +4589,17 @@ function ensureSprite(gfx) {  // a character's sprite sheet and its frame size
   if (!WORLD.infos[gfx]) WORLD.infos[gfx] = serverFetch(`/world/sprite/${gfx}.json?v=${WORLD_DATA}`).then(r => r.json()).then(i => (WORLD.infos[gfx] = i));
 }
 // make `id` the current map, with its neighbours placed around it
-async function enterMap(id) {
-  const m = await worldMap(id);
-  const placed = [{m, x: 0, y: 0}];
-  for (const c of m.connections) {
-    if (!CONNECT[c.direction]) continue;
-    const n = await worldMap(c.map);
-    const [bx, by] = CONNECT[c.direction](c, n, m);
-    placed.push({m: n, x: bx, y: by});
-  }
-  if (!WORLD.cur || WORLD.cur.id !== id) delete WORLD.escTiles[id];  // (a map comes in as the game has it)
-  if (WORLD.me && ["town", "city", "route", "underwater", "ocean_route"].includes(m.type)) WORLD.me.flash = false;  // (FLASH: outdoors, it's over)
-  WORLD.cur = m; WORLD.placed = placed;
-  showWorldInfo();
+function enterMap(id) {
+  const entering = WORLD.entering = (async () => {
+    const [m, near] = await mapAround(id);
+    if (WORLD.entering !== entering) return WORLD.entering;  // (somewhere else was entered meanwhile: that's current)
+    if (!WORLD.cur || WORLD.cur.id !== id) delete WORLD.escTiles[id];  // (a map comes in as the game has it)
+    if (WORLD.me && ["town", "city", "route", "underwater", "ocean_route"].includes(m.type)) WORLD.me.flash = false;  // (FLASH: outdoors, it's over)
+    WORLD.cur = m; WORLD.placed = [{m, x: 0, y: 0}, ...near];
+    showWorldInfo();
+    prefetchAround(m);
+  })();
+  return entering;
 }
 function placedOffset(mapId) {  // where a map sits, in pixels relative to the current one (null: not in view)
   const p = WORLD.placed.find(p => p.m.id === mapId);
@@ -6273,6 +6308,7 @@ async function settleStep(r, guess, id) {
   me.facing = r.facing;
   if (r.elevation != null) me.elevation = r.elevation;  // (the server's say on your height)
   if (r.layer != null) me.layer = r.layer;
+  if (r.kind === "warp") mapAround(r.map).catch(() => {});  // (where it goes, coming while the door opens and the screen fades)
   if (r.kind === "warp" && r.escalator) {  // onto an escalator: you ride it to the other floor, and step off
     const esc = r.escalator, from = {map: me.map, x: me.x, y: me.y};
     sfx("escalator");
@@ -8866,6 +8902,7 @@ async function fieldMoveGo(kind, mon, used) {  // (lockall: you stand still till
     if (r.ok && r.move_to && (r.move_to.kind === "teleport" || r.move_to.kind === "dig")) {
       // (TELEPORT: away spinning up, the screen to black, there, and in from above; DIG: as an ESCAPE ROPE)
       const me = WORLD.me, to = r.move_to, dig = to.kind === "dig";
+      mapAround(to.map).catch(() => {});  // (coming while they spin away)
       sfx("warp_in");  // (spinning away: TeleportFieldEffectTask2, EscapeRopeWarpOutEffect_Spin)
       await (dig ? escapeRopeOut(me) : teleportOut(me));
       WORLD.fade = {start: performance.now(), ms: 266, out: true};
