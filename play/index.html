@@ -345,7 +345,7 @@ function send(msg) {
 }
 // what this copy of the page speaks (bumped by hand, with the server's, when a change needs the other side to have
 // it too): a server behind it turns it away; one ahead of it tells it to reload. Builds otherwise get along
-const PROTOCOL = 3;
+const PROTOCOL = 4;
 // the server to join: an invite (psybeam/invite.py), from this page's link (#s=…), else the one last joined in this
 // browser. It's all the page needs to reach the server straight (WebRTC): its address, its UDP port and its
 // certificate's fingerprint (the browser refuses any server whose certificate isn't that one). s: its text, kept
@@ -403,7 +403,15 @@ function serverCard(on) {
   $("#connect").hidden = !on;
   $("#changeServer").hidden = on || !INVITE;
 }
-function notice(html, bad) { const n = $("#notice"); n.innerHTML = html; n.className = bad ? "bad" : ""; n.style.display = html ? "block" : "none"; }
+function notice(html, bad, reload = false) {
+  const n = $("#notice"); n.innerHTML = html; n.className = bad ? "bad" : ""; n.style.display = html ? "block" : "none";
+  if (reload) {  // (a home-screen app has no reload of its own to press: this is it)
+    const b = document.createElement("button");
+    b.textContent = "Reload"; b.style.marginLeft = "8px";
+    b.onclick = () => location.reload();
+    n.append(" ", b);
+  }
+}
 // your character logged in somewhere else (another tab, or another copy of the page): this one stops, rather
 // than logging back in and pushing that one off in turn, until you say to play here again
 let REPLACED = false;
@@ -434,7 +442,7 @@ function toggleHelp() { SHOW_HELP = !SHOW_HELP; store.set(HELP_KEY, SHOW_HELP ? 
 let SERVER_NAME = store.get(NAME_KEY) || "";
 setTimeout(() => setTitle());  // (once the rest of this script's run)
 // the page's title: "Psybeam v<version> - <server name>" (the version: the server's, filled in as it serves the page)
-const VERSION = "0.1.469";
+const VERSION = "0.1.472";
 if (!VERSION.startsWith("__")) $("#verNum").textContent = "v" + VERSION;  // (bottom left, as the player's id is bottom right)
 function markStale(stale, note = "Reload the app to update") {  // this page's PROTOCOL isn't the server's: red,
   $("#ver").classList.toggle("stale", stale);                       // with how to fix it
@@ -678,11 +686,11 @@ async function hello(args) {
       markStale(true, "The server needs updating");
       notice(`This app is Psybeam v${newer[1]}, but the Psybeam Server you're attempting to connect to is still on ` +
              `v${newer[2]}. The old server version is missing some newer functionality required by this app. ` +
-             "Ask the host to update Psybeam, then reload.", true);
+             "Ask the host to update Psybeam, then reload.", true, true);
     }
     if (/version of Psybeam/.test(e.message)) {
       markStale(true);
-      notice("This server runs a newer version of Psybeam than this app. Reload the app to update.", true);
+      notice("This server runs a newer version of Psybeam than this app. Reload the app to update.", true, true);
     }
     if (!args.name || !PASSCODE) { $("#create").hidden = true; showLogin(); }  // (didn't work: the choices again)
     return e.message.replace(/^\w+Error: /, "");
@@ -1586,8 +1594,8 @@ const FONT_SUBST = {"'": "’", "\"": "”"};
 // info (or its sprites' pictures) bumps this to fetch it afresh (2: sprites' shadow sizes; 3: sprites drawn
 // through their subsprite tables; 4-6: the message box's B button, ringed; 7: the balls' sine table and open
 // frame; 8: the party menu's words in battle; 9: its words for a Pokémon's menu, the summary screen's move cursor;
-// 12: the Trainer Card's front alone, its background apart, for turning it over)
-const WORLD_DATA = 12;
+// 12: the Trainer Card's front alone, its background apart, for turning it over; 13: the start menu's OPTION)
+const WORLD_DATA = 13;
 // ---- the game's sound effects (frapi.sounds): the server renders them from the ROM, a WAV a category (UI, overworld,
 // battle, jingles), each with where its sounds are in it; /world/sounds.json says what there is (and the names of the
 // songs the game's scripts play: sfxSong). Fetched from the first press or click (a page can't start sound before one),
@@ -4064,10 +4072,11 @@ function renderBattle() {
       ], mem.action);
     }
   } else if (w.type === "party") {
-    // the party menu, for the one to send out in a fainted one's place (or for an item to go on): its line stays up
-    // under it; once picked (on the battle's return), the answer
+    // the party menu, for the one to send out in a fainted one's place (or for an item to go on; or, BATTLE STYLE SHIFT
+    // and "Will you change POKéMON?" answered YES, to switch: B backs out of that one): its line stays up under it; once
+    // picked (on the battle's return), the answer
     if (!SCREEN.pm && !w.answered)
-      battlePartyOpen(w.reason === "item_target" ? "item_target" : "send_out", w, slot => {
+      battlePartyOpen(w.reason === "item_target" ? "item_target" : w.can_cancel ? "switch" : "send_out", w, slot => {
         w.answered = true;
         act(slot == null ? {action: "cancel"} : {action: "switch", slot});
       });
@@ -6645,25 +6654,27 @@ function drawText(g, str, variant, x, y) {
   for (const gl of glyphs(str, variant)) { g.drawImage(gl, x, y); x += glyphWidth(gl); }
 }
 function drawMenu(g) { yesNoDraw(g, WORLD.menu); }
-// ---- the start menu (start_menu.c), for guests: POKéMON, BAG, their name, WAIT (UNWAIT while waiting), EXIT ----
+// ---- the start menu (start_menu.c), for guests: POKéMON, BAG, their name, OPTION, WAIT (UNWAIT while waiting), EXIT ----
 // Start (Enter, the touch pad's START) opens it, once you've finished a step; you stand still while it's up. A
 // window at tiles (22, 1), 7 wide and 2 tiles an option less one, in the player's window frame; the options in the
 // normal font from (8, 0), 15 apart, the ▶ by the one the cursor's on (it wraps around, and stays where it was
 // left next time). The bar across the bottom says what that one does (the game's default button mode, HELP). A
 // picks; B or Start closes it. WAIT starts waiting for the main player (while they're playing), UNWAIT stops it.
 let START_MENU = null;  // its words, from the ROM (world.start_menu)
-serverFetch("/world/start_menu.json").then(r => r.json()).then(d => { START_MENU = d; }, () => {});
+serverFetch(`/world/start_menu.json?v=${WORLD_DATA}`).then(r => r.json()).then(d => { START_MENU = d; }, () => {});
 const HELP_WINDOW = {};
 loadImage("/world/battle_ui/help_window.png").then(img => { HELP_WINDOW.img = img; }, () => {});
 let START_CURSOR = 0;
 const WAIT_HELP = {off: "Stand still and wait for the main player.\nYou'll challenge them when they pass you.",
                    on: "Stop waiting for the main player."};
+const OPTION_HELP = "Adjust various game settings such as\nbattle style and sound.";  // (the game's names TEXT SPEED, not here)
 function startItems() {
   const L = (START_MENU && START_MENU.labels) || {}, H = (START_MENU && START_MENU.help) || {};
   const waiting = !!(WORLD.me && WORLD.me.waiting);
   return [{key: "pokemon", label: L.pokemon || "POKéMON", help: H.pokemon},
           {key: "bag", label: L.bag || "BAG", help: H.bag},
           {key: "player", label: (ME && ME.name) || (WORLD.me && WORLD.me.name) || "", help: H.player},
+          {key: "option", label: L.option || "OPTION", help: OPTION_HELP},
           {key: "wait", label: waiting ? "UNWAIT" : "WAIT", help: waiting ? WAIT_HELP.on : WAIT_HELP.off},
           {key: "exit", label: L.exit || "EXIT", help: H.exit}];
 }
@@ -6729,6 +6740,7 @@ function startPick() {
   else if (it.key === "wait") { startClose(); toggleWaiting(); }
   else if (it.key === "player") cardOpen();
   else if (it.key === "bag") bagOpen();
+  else if (it.key === "option") optionOpen();
 }
 function drawStartMenu(g) {
   const frame = WINDOW_FRAME.img, items = startItems();
@@ -6756,6 +6768,111 @@ function drawStartMenu(g) {
   if (SHOW_HELP && HELP_WINDOW.img && help != null) {
     g.drawImage(HELP_WINDOW.img, 0, 120);
     if (FONT.help && FONT.help["A"]) help.split("\n").forEach((line, i) => drawText(g, line, "help", 2, 125 + 15 * i));
+  }
+}
+// ---- the OPTION screen (option_menu.c): OPTION in the start menu, the game's with its own settings ------------------
+// BATTLE STYLE (SHIFT / SET: kept in their save, as the game's) and SOUND (ON / OFF: this page's sounds, as the header's
+// Sound button), then CANCEL. It comes up as the party menu does (that screen's machinery, with P.option), with its own
+// timings: from black, 34 frames on it's faded in, 2 levels every other frame (BeginNormalPaletteFade, delay 0). On black
+// (BG palette 0, cleared), BG2's bar across the top (window 2, 30x2, text window palette 2's color 15) with PICK, SWITCH
+// and CANCEL in the small font ending at 228; the title window (26x2 at (2, 3), "OPTION" at (8, 1)) in the standard
+// window frame; the settings' window (26x12 at (2, 7)) in the player's frame, the names at (8, 2 + 13n), the settings
+// light red at (130, ...). BG0 (that window) is darkened 2/16 but in WIN0, the cursor's row (from 58 + 13n, 14 tall,
+// x 16 to 224). Up and down go round; left and right change the row's setting, round (held, all of them repeat); A or
+// B closes it (no sounds), kept as it starts fading out, 2 levels every other frame from 3 frames on, then 35 frames of
+// black before the field (and the start menu) come back.
+const OPTION_ROWS = 3, OPTION_IN = 34, OPTION_OPEN = 48, OPTION_BLACK = 51;  // (frames: fading in from; open; closed, black till)
+const OPTION_IMG = {};
+function optionOpen() {
+  const O = START_MENU && START_MENU.option;
+  if (!WORLD.me || !O) return;
+  for (const [part, key] of [["std_window_frame", "std"], ["keypad_bar", "keys"]])
+    if (!OPTION_IMG[key]) loadImage(`/world/battle_ui/${part}.png`).then(img => { OPTION_IMG[key] = img; }, () => {});
+  WORLD.party = {phase: "out", t0: performance.now(), held: null,
+                 option: {cursor: 0, values: [ME && ME.battle_style === "shift" ? 0 : 1, SFX.on ? 0 : 1]}};
+}
+function optionMove(P, dir) {
+  const O = P.option;
+  if (P.phase !== "open") return;
+  if (dir === "north") O.cursor = (O.cursor + OPTION_ROWS - 1) % OPTION_ROWS;
+  else if (dir === "south") O.cursor = (O.cursor + 1) % OPTION_ROWS;
+  else if (O.cursor < 2) O.values[O.cursor] ^= 1;  // (east or west: each has two)
+}
+function optionClose(P) {  // (CloseAndSaveOptionMenu: what's chosen kept)
+  if (P.phase !== "open") return;
+  Object.assign(P, {phase: "close", t0: performance.now(), held: null});
+  const [style, sound] = P.option.values, battle_style = style ? "set" : "shift";
+  if (ME && ME.battle_style !== battle_style)
+    send({type: "options", battle_style}).then(r => { ME = r.player; renderMe(); }).catch(e => log("world: " + e.message));
+  if (SFX.on !== !sound) {
+    SFX.on = !sound;
+    store.set("psybeam_sound", SFX.on ? "on" : "off");
+    soundButton();
+    sfxStart();
+  }
+}
+function optionTap(P, [x, y]) {  // (a row: the cursor to it; tapped again, its setting changed, or CANCEL: closed)
+  const row = Math.floor((y - 58) / 13);
+  if (P.phase !== "open" || x < 16 || x >= 224 || y < 58 || row >= OPTION_ROWS) return;
+  if (row !== P.option.cursor) P.option.cursor = row;
+  else if (row === 2) optionClose(P);
+  else optionMove(P, "east");
+}
+function optionTick(g, P, now) {
+  const f = partyFrames(P, now);
+  let y = 0;
+  if (P.phase === "in") {
+    if (f >= OPTION_OPEN) Object.assign(P, {phase: "open", t0: now});
+    else y = f < OPTION_IN ? 16 : 14 - 2 * Math.floor((f - OPTION_IN) / 2);
+  } else if (P.phase === "close") {
+    if (f >= OPTION_BLACK) { Object.assign(P, {phase: "back", t0: now}); WORLD.start = {}; return false; }
+    y = f < 3 ? 0 : Math.min(16, 2 * Math.floor((f - 1) / 2));
+  } else partyRepeat(P, now);
+  if (y < 16) drawOption(g, P.option);
+  fadeScreen(g, y);
+  return true;
+}
+function drawOption(g, O) {
+  const W = START_MENU.option, frame = WINDOW_FRAME.img, std = OPTION_IMG.std, keys = OPTION_IMG.keys;
+  g.fillStyle = "#000"; g.fillRect(0, 0, 240, 160);
+  if (!frame || !std || !FONT.option || !FONT.option["A"]) return;
+  const box = (img, l, t, r, b) => {  // a frame's 9 tiles around tiles (l, t) to (r, b), its corners and edges on them
+    const tile = (k, tx, ty) => g.drawImage(img, (k % 3) * 8, Math.floor(k / 3) * 8, 8, 8, tx * 8, ty * 8, 8, 8);
+    tile(0, l, t); tile(2, r, t); tile(6, l, b); tile(8, r, b);
+    for (let tx = l + 1; tx < r; tx++) { tile(1, tx, t); tile(7, tx, b); }
+    for (let ty = t + 1; ty < b; ty++) { tile(3, l, ty); tile(5, r, ty); }
+  };
+  // the top bar: PICK, SWITCH, CANCEL (and their keypad icons), ending at 228
+  g.fillStyle = W.bar_fill; g.fillRect(0, 0, 240, 16);
+  const tokens = W.bar.split(/(\{KEY_\d+\})/).filter(Boolean), key = t => (t.match(/^\{KEY_(\d+)\}$/) || [])[1];
+  const KEY_TILES = {0: 0x0, 1: 0x1, 10: 0x20, 11: 0x21};  // (sKeypadIcons: A, B, up-down, left-right; each 8 wide)
+  const tokenWidth = t => key(t) != null ? 8 : glyphs(t, "small_option_bar").reduce((n, gl) => n + glyphWidth(gl), 0);
+  let x = 0xE4 - tokens.reduce((n, t) => n + tokenWidth(t), 0);
+  for (const t of tokens) {
+    const k = key(t), tile = KEY_TILES[k];
+    if (k == null) drawText(g, t, "small_option_bar", x, 1);  // (the small font's sheet: from a row below the printer's)
+    else if (keys && tile != null) g.drawImage(keys, (tile % 16) * 8, Math.floor(tile / 16) * 8, 8, 12, x, 0, 8, 12);
+    x += tokenWidth(t);
+  }
+  // the title's window and the settings' window
+  box(std, 1, 2, 28, 5);
+  g.fillStyle = W.fill; g.fillRect(16, 24, 208, 16);
+  drawText(g, W.title, "option", 16 + 8, 24 + 1);
+  box(frame, 1, 6, 28, 19);
+  g.fillStyle = W.fill; g.fillRect(16, 56, 208, 96);
+  const rows = [[W.battle_style[0], W.battle_style[1 + O.values[0]]], [W.sound[0], W.sound[1 + O.values[1]]], [W.cancel, null]];
+  rows.forEach(([name, value], i) => {
+    drawText(g, name, "option", 16 + 8, 56 + 2 + 13 * i);
+    if (value) drawText(g, value, "option_value", 16 + 130, 56 + 2 + 13 * i);
+  });
+  // BG0 darkened 2/16 (BLDCNT's darken, BLDY 2) but in WIN0: the cursor's row
+  const top = 58 + 13 * O.cursor;
+  for (const [y0, y1] of [[56, top], [top + 14, 152]]) {
+    if (y1 <= y0) continue;
+    const img = g.getImageData(16, y0, 208, y1 - y0), d = img.data;
+    for (let i = 0; i < d.length; i += 4)
+      for (let c = 0; c < 3; c++) { const v = d[i + c] >> 3, w = v - ((v * 2) >> 4); d[i + c] = (w << 3) | (w >> 2); }
+    g.putImageData(img, 16, y0);
   }
 }
 // ---- the Trainer Card (trainer_card.c): your name in the start menu, its two sides -------------------------------
@@ -8087,6 +8204,7 @@ function partyClose() {
   const P = WORLD.party;
   if (P && P.card && !P.closing && cardB(P, performance.now())) return;  // (the back: turned back over first)
   if (P && P.townMap) { tmapKey(P, "B"); return; }
+  if (P && P.option) { optionClose(P); return; }
   if (P && P.mart) { if (P.phase === "open") martB(P); return; }
   if (P && P.tmCase) { tmB(P); return; }
   if (P && P.sell && P.phase === "open" && sellB(P)) return;
@@ -8135,6 +8253,7 @@ function partyTick(g, now) {
     return false;
   }
   if (P.townMap) { tmapTick(g, P, now); return true; }  // (its own fades and timings)
+  if (P.option) return optionTick(g, P, now);  // (its too)
   if (P.phase === "in" && partyFrames(P, now) >= 9) Object.assign(P, {phase: "open", t0: now, opened: now});
   if (P.phase === "close" && partyFrames(P, now) >= 9) {
     if (P.next) { WORLD.party = Object.assign(P.next(), {phase: "in", t0: now, next: null}); return partyTick(g, now); }  // (on to
@@ -8231,6 +8350,7 @@ function drawParty(g, now, P = WORLD.party, party = (ME && ME.party) || []) {
 }
 // the cursor (UpdatePartySelectionSingleLayout)
 function partyMove(dir) {
+  if (WORLD.party && WORLD.party.option) { optionMove(WORLD.party, dir); return; }
   if (WORLD.party && WORLD.party.mart) { martMove(WORLD.party, dir); return; }
   if (WORLD.party && WORLD.party.tmCase) { tmMove(WORLD.party, dir); return; }
   if (WORLD.party && WORLD.party.summary) { summaryKey(WORLD.party.summary, dir); return; }
@@ -8275,6 +8395,7 @@ function partyA() {
   if (!P || P.phase !== "open") return;
   if (P.summary) { summaryKey(P.summary, "A"); return; }
   if (P.card) { cardA(P, performance.now()); return; }  // (the front: turned over; the back: closed)
+  if (P.option) { optionClose(P); return; }
   if (P.mart) { martA(P); return; }
   if (P.tmCase) { tmA(P); return; }
   if (P.bag) { bagA(P); return; }
@@ -10527,6 +10648,7 @@ function partyTap(P, p, mouse, e) {
   if (P.summary) { summaryDown(P.summary, p, e); return; }
   const [x, y] = p;
   if (P.card) { cardA(P, performance.now()); return; }  // (a tap: as A)
+  if (P.option) { optionTap(P, p); return; }
   if (P.mart) { martTap(P, p, mouse, e); return; }
   if (P.tmCase) { tmTap(P, p, mouse, e); return; }
   if (P.bag) { bagTap(P, p, mouse, e); return; }
