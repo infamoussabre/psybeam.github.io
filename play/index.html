@@ -342,7 +342,7 @@ function send(msg) {
 }
 // what this copy of the page speaks (bumped by hand, with the server's, when a change needs the other side to have
 // it too): a server behind it turns it away; one ahead of it tells it to reload. Builds otherwise get along
-const PROTOCOL = 4;
+const PROTOCOL = 5;
 // the server to join: an invite (psybeam/invite.py), from this page's link (#s=…), else the one last joined in this
 // browser. It's all the page needs to reach the server straight (WebRTC): its address, its UDP port and its
 // certificate's fingerprint (the browser refuses any server whose certificate isn't that one). s: its text, kept
@@ -439,7 +439,7 @@ function toggleHelp() { SHOW_HELP = !SHOW_HELP; store.set(HELP_KEY, SHOW_HELP ? 
 let SERVER_NAME = store.get(NAME_KEY) || "";
 setTimeout(() => setTitle());  // (once the rest of this script's run)
 // the page's title: "Psybeam v<version> - <server name>" (the version: the server's, filled in as it serves the page)
-const VERSION = "0.1.479";
+const VERSION = "0.1.488";
 if (!VERSION.startsWith("__")) $("#verNum").textContent = "v" + VERSION;  // (bottom left, as the player's id is bottom right)
 function markStale(stale, note = "Reload the app to update") {  // this page's PROTOCOL isn't the server's: red,
   $("#ver").classList.toggle("stale", stale);                       // with how to fix it
@@ -4543,13 +4543,14 @@ function tilesetAnims(key) {
   return WORLD.anims[key];
 }
 // Once you're on a map, what's next is fetched while you stand there: through its doors and warps, the art of
-// where they go (the map itself is asked for as you go through: it's as the game has it then); past its edges,
-// the maps beyond the ones joined to it, whole (as those are), so walking on from one never waits
+// where they go and the maps joined to it, whole (the map itself is asked for as you go through: it's as the game
+// has it then); past its edges, the maps beyond the ones joined to it, whole (as those are), so walking on never waits
 function prefetchAround(m) {
   const later = () => {
     if (WORLD.cur !== m) return;  // (gone on already)
-    for (const id of new Set(m.warps.map(w => w.map)))
-      if (!WORLD.cache[id]) mapJson(id).then(mapArt).catch(() => {});
+    for (const id of new Set(m.warps.map(w => w.map).filter(id => id !== "dynamic")))
+      if (WORLD.cache[id]) mapAround(id).catch(() => {});
+      else mapJson(id).then(d => Promise.all([mapArt(d), ...d.connections.filter(c => CONNECT[c.direction]).map(c => worldMap(c.map))])).catch(() => {});
     for (const c of m.connections) if (CONNECT[c.direction]) mapAround(c.map).catch(() => {});
   };
   setTimeout(later, 500);  // (after what's on screen has what it needs)
@@ -4599,7 +4600,7 @@ function enterMap(id) {
     showWorldInfo();
     prefetchAround(m);
   })();
-  return entering;
+  return waitingOn(entering);
 }
 function placedOffset(mapId) {  // where a map sits, in pixels relative to the current one (null: not in view)
   const p = WORLD.placed.find(p => p.m.id === mapId);
@@ -4617,6 +4618,31 @@ function showWorldInfo() {
   const me = WORLD.me, m = me && WORLD.placed.find(p => p.m.id === me.map);
   $("#worldInfo").textContent = m ? `${m.m.name} · ${me.x}, ${me.y}` : "";
   $("#where").hidden = !m;
+}
+// ---- loading: a Poké Ball spinning in the screen's bottom right corner while you're kept waiting ---------
+// (on the server's answer to a step, a map still coming, a stop till the server's checked what's ahead; not what's
+// fetched in the background). A wait shorter than LOADING_SHOW_MS shows nothing: no flicker on a quick connection.
+const LOADING = new Set();  // the waits going on: {since}
+const LOADING_SHOW_MS = 150, LOADING_TURN_FRAMES = 48;  // (once round every 48 game frames)
+function waitingOn(p) {
+  const w = {since: performance.now()}, done = () => LOADING.delete(w);
+  LOADING.add(w);
+  p.then(done, done);
+  return p;
+}
+function drawLoading(g, now) {
+  let since = WORLD.hold ? WORLD.hold.since : Infinity;
+  for (const w of LOADING) since = Math.min(since, w.since);
+  const ball = now - since >= LOADING_SHOW_MS && bcImg("/world/battle_ui/ball_poke.png");
+  if (!ball) return;
+  // turned as the GBA turns a sprite (its affine matrix: each pixel the nearest of the picture's, no smoothing)
+  const turn = Math.floor((now - since) / FRAME_MS) % LOADING_TURN_FRAMES / LOADING_TURN_FRAMES;
+  g.save();
+  g.imageSmoothingEnabled = false;
+  g.translate(232, 152);
+  g.rotate(turn * 2 * Math.PI);
+  g.drawImage(ball, 0, 0, 16, 16, -8, -8, 16, 16);
+  g.restore();
 }
 // ---- the GBA's screen, for the effects the game makes with it -------------------------------------------
 // Some of FireRed's effects (the battle transitions) are made with the GBA's display itself: each line of the
@@ -6146,35 +6172,79 @@ const KEY_DIRS = {ArrowUp: "north", ArrowDown: "south", ArrowLeft: "west", Arrow
 const WASD_DIRS = {KeyW: "north", KeyS: "south", KeyA: "west", KeyD: "east"};
 const keyDir = e => KEY_DIRS[e.key] || WASD_DIRS[e.code];  // (the arrows, or W, A, S, D)
 const STEP = {north: [0, -1], south: [0, 1], west: [-1, 0], east: [1, 0]};
-// tiles the client leaves to the server (ledges, warps, one-way edges): FireRed metatile behaviors
+// FireRed metatile behaviors a step goes by (as frapi/overworld.py's Overworld._step has them)
 const MB_WATERFALL_B = 0x13;
-const SPECIAL_BEHAVIOR = b => (b >= 0x30 && b <= 0x3B) || (b >= 0x60 && b <= 0x71);
-// your own ordinary step, checked here so it can start at once: null = ask the server first, "bump" = blocked
+const MB_IMPASSABLE = {0x30: "east", 0x31: "west", 0x32: "north", 0x33: "south", 0x34: "north east", 0x35: "north west",
+                       0x36: "south east", 0x37: "south west"};  // (the sides of the block you can't cross)
+const MB_JUMP = {0x38: "east", 0x39: "west", 0x3A: "north", 0x3B: "south"};
+const MB_ARROW_WARP = {0x62: "east", 0x63: "west", 0x64: "north", 0x65: "south"};
+const MB_STAIR_WARP = {0x6C: "east", 0x6D: "west", 0x6E: "east", 0x6F: "west"};
+const MB_STEP_WARPS = [0x60, 0x61, 0x66, 0x67, 0x68, 0x69, 0x6A, 0x6B, 0x71];  // (the escalators among them: the server's)
+const blocks = (s, dir) => (s || "").split(" ").includes(dir);
+// may you go onto map `id`? Only when the server's said so (its "what's ahead": open): else it's asked first
+const mapOpen = id => !!(WORLD.ahead && WORLD.ahead.open && WORLD.ahead.open[id]);
+// Your step, worked out here so it starts at once (the server checks it, and has the last word: settleStep):
+// {map, x, y, elevation, kind: "walk" (or run), "jump" (over a ledge) or "warp" (through a door, onto a doorway or
+// ladder, off an exit mat: `warp` the warp, `door` the door, `onto` stepped onto first)}; "bump": blocked, as the
+// game would have it; null: only the server knows (a boulder, a map it hasn't said you may go to, the water's edge...)
 function predictStep(me, dir) {
   const p = WORLD.placed.find(p => p.m.id === me.map);
   if (!p) return null;
-  const m = p.m, [dx, dy] = STEP[dir], x = me.x + dx, y = me.y + dy;
-  const here = m.blocks[me.x + me.y * m.width];
-  if (SPECIAL_BEHAVIOR(m.behaviors[here & 0x3FF])) return null;
-  if (x < 0 || y < 0 || x >= m.width || y >= m.height) return null;  // into the next map: the server knows
-  const block = m.blocks[x + y * m.width], behavior = m.behaviors[block & 0x3FF], elevation = block >> 12;
-  if (SPECIAL_BEHAVIOR(behavior) || m.warps.some(w => w.x === x && w.y === y)) return null;
-  if (me.surfing) {  // (on the water: on over more of it; anything else, the server says: land, a waterfall...)
-    const here_ = (c) => c && c.map === me.map && c.x === x && c.y === y;
-    if (!(m.surfable || []).includes(behavior) || (block >> 10) & 3 || behavior === MB_WATERFALL_B || m.npcs.some(n => npcShown(n) && n.x === x && n.y === y)
-        || here_(WORLD.main) || Object.values(WORLD.others).some(c => here_(c) && !ghostWith(c))) return null;
-    return {map: me.map, x, y, elevation: me.elevation};
+  const m = p.m, [dx, dy] = STEP[dir];
+  const here = m.blocks[me.x + me.y * m.width], hereB = m.behaviors[here & 0x3FF];
+  const warpAt = (mm, x, y) => mm.warps.find(w => w.x === x && w.y === y);
+  const warpTo = w => w.map !== "dynamic" && mapOpen(w.map);  // (DIG's way back, "dynamic": the server's)
+  // an exit mat or directional stairs under you, pushed their way
+  const mat = warpAt(m, me.x, me.y);
+  if (mat && (MB_ARROW_WARP[hereB] === dir || MB_STAIR_WARP[hereB] === dir))
+    return warpTo(mat) ? {map: me.map, x: me.x, y: me.y, elevation: me.elevation, kind: "warp", warp: mat} : null;
+  let tm = m, x = me.x + dx, y = me.y + dy;
+  if (x < 0 || y < 0 || x >= m.width || y >= m.height) {  // off the edge: into the map joined there (Overworld._across)
+    const joined = m.connections.filter(c => c.direction === dir);
+    if (!joined.length) return "bump";
+    let across = null;
+    for (const c of joined) {
+      const n = WORLD.loaded[c.map];
+      if (!n || !WORLD.placed.some(q => q.m === n)) return null;  // (not here yet)
+      const nx = {north: x - c.offset, south: x - c.offset, west: n.width - 1, east: 0}[dir];
+      const ny = {north: n.height - 1, south: 0, west: y - c.offset, east: y - c.offset}[dir];
+      if (nx >= 0 && ny >= 0 && nx < n.width && ny < n.height) { across = [n, nx, ny]; break; }
+    }
+    if (!across) return "bump";
+    [tm, x, y] = across;
+    if (!mapOpen(tm.id)) return null;  // (kept out, maybe: the server walks you back)
   }
-  if ((block >> 10) & 3) return "bump";
-  if (elevation !== 0 && elevation !== 15 && me.elevation && me.elevation !== elevation) return "bump";
-  const here_ = (c) => c && c.map === me.map && c.x === x && c.y === y;
-  const mainBlocks = here_(WORLD.main) && !(performance.now() < (WORLD.ghostUntil || 0));
-  const npc = m.npcs.find(n => npcShown(n) && n.x === x && n.y === y);
+  const block = tm.blocks[x + y * tm.width], behavior = tm.behaviors[block & 0x3FF], elevation = block >> 12;
+  const at = (c, xx = x, yy = y) => c && c.map === tm.id && c.x === xx && c.y === yy;
+  const occupied = (xx, yy) => tm.npcs.some(n => npcShown(n) && n.x === xx && n.y === yy)
+    || (at(WORLD.main, xx, yy) && !(performance.now() < (WORLD.ghostUntil || 0))) || Object.values(WORLD.others).some(c => at(c, xx, yy) && !ghostWith(c));
+  const height = e => e === 15 || (here >> 12) === 15 ? me.elevation : e;  // (ObjectEventUpdateElevation)
+  if (me.surfing) {  // (on the water: on over more of it; anything else, the server says: land, a waterfall...)
+    if (tm !== m || !(m.surfable || []).includes(behavior) || (block >> 10) & 3 || behavior === MB_WATERFALL_B || occupied(x, y)) return null;
+    return {map: me.map, x, y, elevation: me.elevation, kind: "surf"};
+  }
+  const warp = warpAt(tm, x, y);
+  if (warp && behavior === MB_WARP_DOOR) {  // a door: pushing north against it takes you in
+    if (dir !== "north") return "bump";
+    return warpTo(warp) ? {map: me.map, x: me.x, y: me.y, elevation: me.elevation, kind: "warp", warp, door: doorAt(tm.id, x, y)} : null;
+  }
+  if (MB_JUMP[behavior] === dir) {  // a ledge: over it, onto the block past it
+    const lx = x + dx, ly = y + dy;
+    if (lx < 0 || ly < 0 || lx >= tm.width || ly >= tm.height) return null;
+    const landing = tm.blocks[lx + ly * tm.width];
+    if ((landing >> 10) & 3 || occupied(lx, ly)) return "bump";
+    return {map: tm.id, x: lx, y: ly, elevation: height(landing >> 12), kind: "jump"};
+  }
+  const npc = tm.npcs.find(n => npcShown(n) && n.x === x && n.y === y);
   if (npc && npc.gfx === FIELD_GFX.strength) return null;  // (a boulder: STRENGTH may push it; the server knows)
-  if (npc || mainBlocks) return "bump";
-  if (Object.values(WORLD.others).some(c => here_(c) && !ghostWith(c))) return "bump_guest";  // (the server counts these: _guest_bumped)
-  // your height becomes the block's, "any height" (0) too, unless it or the one you leave is 15 (ObjectEventUpdateElevation)
-  return {map: me.map, x, y, elevation: elevation === 15 || (here >> 12) === 15 ? me.elevation : elevation};
+  if ((block >> 10) & 3 || blocks(MB_IMPASSABLE[hereB], dir) || blocks(MB_IMPASSABLE[behavior], OPPOSITE_DIR[dir])
+      || (elevation !== 0 && elevation !== 15 && me.elevation && me.elevation !== elevation) || npc || (at(WORLD.main) && !(performance.now() < (WORLD.ghostUntil || 0)))) return "bump";
+  if (Object.values(WORLD.others).some(c => at(c) && !ghostWith(c))) return "bump_guest";  // (the server counts these: _guest_bumped)
+  if (warp && MB_STEP_WARPS.includes(behavior)) {  // a doorway, ladder...: onto it, and it takes you (not an escalator: the server's)
+    if (!STEP_ONTO_WARPS.includes(behavior)) return null;
+    return warpTo(warp) ? {map: me.map, x: me.x, y: me.y, elevation: me.elevation, kind: "warp", warp, onto: {map: tm.id, x, y}} : null;
+  }
+  return {map: tm.id, x, y, elevation: height(elevation), kind: "walk"};
 }
 function moving(c, now) { return c && c.anim && now < c.anim.end; }
 // another guest you keep bumping into (or who keeps bumping into you): for a while, you walk through each other
@@ -6207,7 +6277,7 @@ function worldTick(now) {
       send({type: "face", dir}).catch(() => {});
     } else if (dir && now >= WORLD.turnUntil && now >= (WORLD.bumpUntil || 0)) takeStep(me, dir, now);
   }
-  try { drawWorld(); }  // (a drawing error is told once, and the world goes on: it doesn't stop dead)
+  try { drawWorld(); drawLoading($("#worldScreen").getContext("2d"), now); }  // (a drawing error is told once, and the world goes on: it doesn't stop dead)
   catch (e) { if (!WORLD.drawError) log("world: drawing failed: " + e.message); WORLD.drawError = true; }
   requestAnimationFrame(worldTick);
 }
@@ -6221,16 +6291,38 @@ function takeStep(me, dir, now) {
     send(guess === "bump_guest" ? {type: "face", dir, bump: true} : {type: "face", dir}).catch(() => {});
     return;
   }
-  if (guess) {
+  const msg = {type: "step", dir, run};
+  const reply = send(msg);
+  if (guess && guess.kind === "warp") {  // through a warp: the door opens, you go in, the screen fades, while the
+    WORLD.waiting = true;                //  server says where you come out (only needed once it's black)
+    mapAround(guess.warp.map).catch(() => {});  // (the map there: as it is now)
+    WORLD.warpOut = warpOut(me, guess);
+    WORLD.warpOut.then(() => waitingOn(reply));
+  } else if (guess) {
     const from = {map: me.map, x: me.x, y: me.y};
-    Object.assign(me, {x: guess.x, y: guess.y});
+    Object.assign(me, {map: guess.map, x: guess.x, y: guess.y});
     me.elevation = guess.elevation;
     if (guess.elevation && guess.elevation !== 15) me.layer = guess.elevation;
-    animate(me, from, run ? 8 : 16, run ? "run" : "walk", now);
-  } else WORLD.waiting = true;  // the server decides before anything moves
-  const msg = {type: "step", dir, run};
-  send(msg).then(r => settleStep(r, guess, msg.id)).catch(e => { WORLD.waiting = false; log("world: " + e.message); });
-  if (guess) aheadStep(msg.id, guess.map, guess.x, guess.y, !!me.surfing, now);
+    if (guess.kind === "jump") { sfx("ledge"); animate(me, from, 32, "jump", now); }  // (PlayerJumpLedge)
+    else animate(me, from, run ? 8 : 16, run ? "run" : "walk", now);
+    if (guess.map !== WORLD.cur.id) enterMap(guess.map).catch(() => {});  // (into the next map)
+  } else { WORLD.waiting = true; waitingOn(reply); }  // the server decides before anything moves
+  reply.then(r => settleStep(r, guess, msg.id)).catch(e => { WORLD.waiting = false; log("world: " + e.message); });
+  if (guess && guess.kind !== "warp") aheadStep(msg.id, guess.map, guess.x, guess.y, !!me.surfing, now);
+}
+// going through a warp, up to the screen gone black: into the door (it opens, you step in, it shuts), or onto the
+// doorway or ladder, or off the exit mat
+async function warpOut(me, guess) {
+  if (guess.door) await walkIntoDoor(me, guess.door);
+  else if (guess.onto) {  // (onto a doorway with no door, a ladder...: the step, then away)
+    const from = {map: me.map, x: me.x, y: me.y};
+    Object.assign(me, {x: guess.onto.x, y: guess.onto.y});
+    animate(me, from, 16, "walk");
+    await waitFrames(16);
+  }
+  if (!guess.door) sfx("exit");  // (DoWarp's; through a door, the door's)
+  WORLD.fade = {start: performance.now(), ms: 160, out: true};
+  await new Promise(ok => setTimeout(ok, 160));
 }
 // ---- what's ahead: steps the server would stop (a wild Pokémon, a trainer who'd see you) ------------------
 // Steps start before the server has answered the last (takeStep), and what a step leads to is only known once it's
@@ -6274,7 +6366,7 @@ function aheadStep(id, map, x, y, surfing, now) {
     }
   }
   if (key) WORLD.aheadSteps.push({id, key});
-  if (stop || sightStops(map, x, y)) WORLD.hold = {id, until: now + AHEAD_HOLD_MS};
+  if (stop || sightStops(map, x, y)) WORLD.hold = {id, until: now + AHEAD_HOLD_MS, since: now};
 }
 // your step `id` wasn't one the server checks after: not counted, and not waited for
 function aheadUnstep(id) {
@@ -6308,6 +6400,14 @@ async function settleStep(r, guess, id) {
   me.facing = r.facing;
   if (r.elevation != null) me.elevation = r.elevation;  // (the server's say on your height)
   if (r.layer != null) me.layer = r.layer;
+  if (guess && guess.kind === "warp") {  // (gone through already, as far as the screen going black)
+    await WORLD.warpOut;
+    WORLD.warpOut = null;
+    if (r.kind !== "warp") {  // (not let through after all: back out of the black, where the server has you)
+      me.hidden = false;
+      WORLD.fade = {start: performance.now(), ms: 160, out: false};
+    }
+  }
   if (r.kind === "warp") mapAround(r.map).catch(() => {});  // (where it goes, coming while the door opens and the screen fades)
   if (r.kind === "warp" && r.escalator) {  // onto an escalator: you ride it to the other floor, and step off
     const esc = r.escalator, from = {map: me.map, x: me.x, y: me.y};
@@ -6325,17 +6425,10 @@ async function settleStep(r, guess, id) {
     me.facing = r.facing;
     resetRing();
   } else if (r.kind === "warp") {
-    const [dx, dy] = STEP[r.facing] || [0, 0], into = doorAt(me.map, me.x + dx, me.y + dy);
-    if (into) await walkIntoDoor(me, into);
-    else if (stepWarpAt(me.map, me.x + dx, me.y + dy)) {  // (onto a doorway with no door, a ladder...: the step, then away)
-      const from = {map: me.map, x: me.x, y: me.y};
-      Object.assign(me, {x: me.x + dx, y: me.y + dy});
-      animate(me, from, 16, "walk");
-      await waitFrames(16);
+    if (!(guess && guess.kind === "warp")) {  // (one the page didn't see coming: through it now)
+      const [dx, dy] = STEP[r.facing] || [0, 0], door = doorAt(me.map, me.x + dx, me.y + dy);
+      await warpOut(me, {door, onto: !door && stepWarpAt(me.map, me.x + dx, me.y + dy)});
     }
-    if (!into) sfx("exit");  // (DoWarp's; through a door, the door's)
-    WORLD.fade = {start: performance.now(), ms: 160, out: true};
-    await new Promise(ok => setTimeout(ok, 160));
     await enterMap(r.map);
     WORLD.doors = [];
     Object.assign(me, {map: r.map, x: r.x, y: r.y, anim: null, hidden: false});
@@ -6362,7 +6455,7 @@ async function settleStep(r, guess, id) {
     WORLD.bumpUntil = now + 32 * FRAME_MS;
     sfx("strength");  // (DoBoulderDust)
     if (r.field) fieldPush(r.field);
-  } else if (guess && guess.map === r.map && guess.x === r.x && guess.y === r.y) {
+  } else if (guess && guess.kind !== "warp" && guess.map === r.map && guess.x === r.x && guess.y === r.y) {
     // as predicted
   } else if (["walk", "run", "jump", "surf"].includes(r.kind)) {
     if (r.kind === "jump") sfx("ledge");  // (PlayerJumpLedge)
