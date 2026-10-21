@@ -345,7 +345,7 @@ function send(msg) {
 }
 // what this copy of the page speaks (bumped by hand, with the server's, when a change needs the other side to have
 // it too): a server behind it turns it away; one ahead of it tells it to reload. Builds otherwise get along
-const PROTOCOL = 2;
+const PROTOCOL = 3;
 // the server to join: an invite (psybeam/invite.py), from this page's link (#s=…), else the one last joined in this
 // browser. It's all the page needs to reach the server straight (WebRTC): its address, its UDP port and its
 // certificate's fingerprint (the browser refuses any server whose certificate isn't that one). s: its text, kept
@@ -434,7 +434,7 @@ function toggleHelp() { SHOW_HELP = !SHOW_HELP; store.set(HELP_KEY, SHOW_HELP ? 
 let SERVER_NAME = store.get(NAME_KEY) || "";
 setTimeout(() => setTitle());  // (once the rest of this script's run)
 // the page's title: "Psybeam v<version> - <server name>" (the version: the server's, filled in as it serves the page)
-const VERSION = "0.1.460";
+const VERSION = "0.1.469";
 if (!VERSION.startsWith("__")) $("#verNum").textContent = "v" + VERSION;  // (bottom left, as the player's id is bottom right)
 function markStale(stale, note = "Reload the app to update") {  // this page's PROTOCOL isn't the server's: red,
   $("#ver").classList.toggle("stale", stale);                       // with how to fix it
@@ -885,7 +885,60 @@ function ownTrainer(who, ms) { const screen = SCREEN; screen.trnBusy[who]++; lat
 // start; ball k is party slot k, the foe's from the right)
 const TRAY = {me: {bar: [136, 96], exitBar: 136, ball: k => 156 + 10 * k, ballY: 88, dir: -1},
               foe: {bar: [-24, 40], exitBar: -88, ball: k => 76 - 10 * k, ballY: 32, dir: 1}};
-const BALL_SPEED = 56;  // (each frame a moving ball's speed grows by this, in 16ths of a pixel; it moves that far, then keeps it rounded down to 16)
+// Pixels read back from a canvas (getImageData) aren't exact: a browser guarding against fingerprinting (Safari) adds a
+// little noise to them. So what's read back is judged by thresholds, never exact values: opaque is alpha >= OPAQUE (the
+// game's pictures are all opaque or clear), a color is near enough to the one looked for (blendedImg's `only`)
+const OPAQUE = 128;
+const BALL_SPEED = 56;
+// the EXP bar (Task_GiveExpWithExpBar): its sound starts 13 frames before it moves; once it's done, the battle script
+// goes on 15 frames later (getexp running through the rest of the party). A level up's animation: the box's (Special_LevelUp
+// to Task_UpdateLvlInHealthbox), then the stripes over the Pokémon (Task_CreateLevelUpVerticalStripes), 94 frames in
+// all till the battle goes on; 24 without the stripes (the Pokémon not showing)
+const EXP_BAR_LEAD = 13, EXP_BAR_TRAIL = 15, LEVEL_UP_FRAMES = 94, LEVEL_UP_BOX_FRAMES = 24;
+// The stripes (Task_LevelUpVerticalSprites): 8x16 sprites made every other frame from frame 26 of the level up, 18 of
+// them, the nth at x ((n * 219) & 63) - 32 from the Pokémon's center (the sprite's: its picture's), y 32 below it;
+// each rises (its speed (ISO_RANDOMIZE1(n) & 63) + 32 in 16ths of a pixel a frame) till it's over 64 up, then it's
+// gone. Semi-transparent sprites over the Pokémon (moved to a BG for it: MoveBattlerSpriteToBG), blended with what's
+// under them 12/16 to 6/16 (BLDALPHA); under the text box (BG0)
+const STRIPES_FROM = 26, STRIPE_COUNT = 18;
+const stripeSpeed = n => ((Math.imul(1103515245, n) + 24691) & 0x3F) + 0x20;
+function levelUpStripes(f) {  // the ones showing on frame f of the level up: [{x, y}] (their top left, from the center)
+  const out = [];
+  for (let n = 1; n <= STRIPE_COUNT; n++) {
+    const steps = f - (STRIPES_FROM + 2 * (n - 1)) - 2;  // (moved by its callback from the frame after it's made; shown the frame after that)
+    if (steps < 1) continue;
+    const y2 = (-stripeSpeed(n) * steps) >> 4;
+    if (y2 >= -64) out.push({x: ((n * 219) & 0x3F) - 32 - 4, y: 32 + y2 - 8});
+  }
+  return out;
+}
+let STRIPE_PX = null;  // the stripe's pixels (5-bit colors, or null where it's clear)
+function drawStripes(g, L) {
+  const im = bcImg("/world/battle_ui/level_up_stripe.png");
+  if (!im) return;
+  if (!STRIPE_PX) {
+    const c = document.createElement("canvas"); c.width = 8; c.height = 16;
+    const cg = c.getContext("2d"); cg.drawImage(im, 0, 0);
+    const d = cg.getImageData(0, 0, 8, 16).data;
+    STRIPE_PX = [];
+    for (let i = 0; i < 128; i++) STRIPE_PX.push(d[i * 4 + 3] >= OPAQUE ? [d[i * 4] >> 3, d[i * 4 + 1] >> 3, d[i * 4 + 2] >> 3] : null);
+  }
+  for (const st of levelUpStripes(L.f)) {
+    const x0 = L.x + st.x, y0 = L.y + st.y, x1 = Math.max(0, x0), y1 = Math.max(0, y0);
+    const w = Math.min(240, x0 + 8) - x1, h = Math.min(160, y0 + 16) - y1;
+    if (w <= 0 || h <= 0) continue;
+    const img = g.getImageData(x1, y1, w, h), d = img.data;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const p = STRIPE_PX[(y1 - y0 + y) * 8 + (x1 - x0 + x)];
+      if (!p) continue;
+      for (let c = 0; c < 3; c++) {
+        const v = Math.min(31, (12 * p[c] + 6 * (d[(y * w + x) * 4 + c] >> 3)) >> 4);
+        d[(y * w + x) * 4 + c] = (v << 3) | (v >> 2);
+      }
+    }
+    g.putImageData(img, x1, y1);
+  }
+}  // (each frame a moving ball's speed grows by this, in 16ths of a pixel; it moves that far, then keeps it rounded down to 16)
 // The battle as items to play: each of the game's lines (as its text printer takes it: `box`, with the
 // game's own line breaks and prompts), the events that animate, in order. "X used Y!" and "Go! X!" come just
 // before their line, and play after it.
@@ -1040,12 +1093,15 @@ function applyEvent(e, b) {
     if (e.type === "exp_gained") {
       const from = expPx(me);
       me.exp = e.exp;
-      return ANIM.exp(from, expPx(me));
+      // (filled up: the level up's animation comes straight after; else the battle script goes on a moment later)
+      const full = me.exp_next != null && e.exp >= me.exp_next;
+      return ANIM.exp(from, expPx(me), full ? 0 : gameFrames(EXP_BAR_TRAIL));
     }
-    const fill = ANIM.exp(expPx(me), 64);
+    const fill = expPx(me) < 64 ? ANIM.exp(expPx(me), 64) : 0;  // (its exp_gained has filled it, as a rule)
     Object.assign(me, {level: e.level, exp_level: e.exp_level ?? me.exp_level, exp_next: e.exp_next ?? me.exp_next});
-    later(() => { if (SCREEN) { syncHudOnly("me", me); ANIM.levelUp(); } }, fill);
-    return fill + T.levelUp;
+    const stripes = !!(SCREEN && SCREEN.spr.me.visible);  // (DestroyExpTaskAndCompleteOnInactiveTextPrinter: if it shows)
+    later(() => { if (SCREEN) ANIM.levelUp(() => syncHudOnly("me", me), stripes); }, fill);
+    return fill + gameFrames(stripes ? LEVEL_UP_FRAMES : LEVEL_UP_BOX_FRAMES);
   }
   if (e.type === "hit") { sfx(e.effect); return 0; }  // (Cmd_effectivenesssound: as it's hit, the blink just after)
   if (e.type === "sound") { sfxSong(e.song); return 0; }  // (a battle script's playse or fanfare: a level up's, a move learned's)
@@ -1718,7 +1774,7 @@ let SCREEN = null;  // {id, gba, bg, bottom, meta, spr: {foe, me}, hud: {foe, me
 // printer's speed and the game's own pause after a line). textSpeed comes from the server (battle_text_speed).
 const T = {textChar: 1, lineHold: 1, barStep: 17, blink: 533, attack: 683, faintPause: 1233, faintSink: 267, transitionFrame: 17,
            trainerFrame: 17, boxGap: 133, withdraw: 517,
-           stat: 1283, status: 800, levelUp: 400, step: 30};
+           stat: 1283, status: 800, step: 30};
 const hpColor = f => f > .5 ? "green" : f >= .2 ? "yellow" : "red";
 setInterval(() => {
   const H = SHOWN && SCREEN && SCREEN.hud && SCREEN.hud.me;
@@ -1840,21 +1896,26 @@ function drawHud(g, who, H, now) {
     const ex = bcImg("/world/battle_ui/exp_fill.png");
     if (ex && H.exp) for (let i = 0; i < H.exp; i += 8) g.drawImage(ex, 0, 0, Math.min(8, H.exp - i), 2, x0 + 32 + i, y + 35, Math.min(8, H.exp - i), 2);
   }
-  if (H.flash) { g.save(); g.globalAlpha = H.flash; g.globalCompositeOperation = "lighter"; if (box) g.drawImage(box, x0, y); g.restore(); }
+  const flashed = (FONT_SHEETS.small && FONT_SHEETS.small.info.healthbox_flash || "").match(/[0-9a-f]{2}/gi);
+  if (H.flash && box && flashed)  // (a level up: the frame's dark color, H.flash/16 of the way to light blue)
+    g.drawImage(blendedImg(box, box.src + "#flash", H.flash, [20, 27, 31], flashed.map(h => parseInt(h, 16) >> 3)), x0, y);
 }
 // a Pokémon (or trainer) sprite: 64x64, cut off at its square (a faint sinks it out of the bottom), grown from its
 // feet (a recall's shrinking), coming out of its ball (BATTLER_AFFINE_EMERGE), whitened, tinted, its colors blended
 // toward another (BlendPalette: shaded gray riding in at the start of a wild battle; a ball's color coming out)
 const BLENDED = {};  // url + level + color -> canvas
-function blendedImg(img, url, y, to) {  // each color y/16 of the way to `to` (5-bit [r, g, b]), as BlendPalette works it
-  const key = `${url}@${y}@${to}`;
+function blendedImg(img, url, y, to, only = null) {  // each color (or only that one) y/16 of the way to `to` (5-bit [r, g, b]), as BlendPalette works it
+  const key = `${url}@${y}@${to}@${only}`;
   if (BLENDED[key]) return BLENDED[key];
   const c = document.createElement("canvas"); c.width = img.naturalWidth || img.width; c.height = img.naturalHeight || img.height;
   const g = c.getContext("2d");
   g.drawImage(img, 0, 0);
   const d = g.getImageData(0, 0, c.width, c.height), p = d.data;
-  for (let i = 0; i < p.length; i += 4)
+  for (let i = 0; i < p.length; i += 4) {
+    // (that color, near enough: a browser may add a little noise to what's read back, against fingerprinting)
+    if (only && [0, 1, 2].some(k => Math.abs(p[i + k] - ((only[k] << 3) | (only[k] >> 2))) > 3)) continue;
     for (let k = 0; k < 3; k++) { const v = p[i + k] >> 3, w = v + (((to[k] - v) * y) >> 4); p[i + k] = (w << 3) | (w >> 2); }
+  }
   g.putImageData(d, 0, 0);
   return (BLENDED[key] = c);
 }
@@ -1878,7 +1939,7 @@ function affineDraw(g, src, sx, sy, sw, sh, cx, cy, bw, bh, [pa, pb, pc, pd]) {
     const tx = ((pa * dx + pb * dy) >> 8) + (sw >> 1), ty = ((pc * dx + pd * dy) >> 8) + (sh >> 1);
     if (tx < 0 || ty < 0 || tx >= sw || ty >= sh) continue;
     const s = ((sy + ty) * P.w + sx + tx) * 4, d = (j * bw + i) * 4;
-    if (P.data[s + 3]) for (let k = 0; k < 4; k++) o[d + k] = P.data[s + k];
+    if (P.data[s + 3] >= OPAQUE) for (let k = 0; k < 4; k++) o[d + k] = P.data[s + k];
   }
   t.g.putImageData(out, 0, 0);
   g.drawImage(t.c, cx - (bw >> 1), cy - (bh >> 1));
@@ -1933,25 +1994,10 @@ function drawTray(g, who, tray) {
   if (balls) for (const b of tray.balls) g.drawImage(balls, 8 * (K[b.kind] ?? 0), 0, 8, 8, L.ball(b.k) + b.x2, L.ballY, 8, 8);
   g.restore();
 }
-// the backdrop part way through its flash: the colors of its palettes that go white (where the flash picture is
-// white) y/16 of the way there, as BlendPalette works it
-const FLASHED = {};  // url + level -> canvas
-function flashedBg(bg, flash, url, y) {
-  const key = url + "@" + y;
-  if (FLASHED[key]) return FLASHED[key];
-  const c = document.createElement("canvas"); c.width = bg.naturalWidth; c.height = bg.naturalHeight;
-  const g = c.getContext("2d");
-  g.drawImage(flash, 0, 0);
-  const white = g.getImageData(0, 0, c.width, c.height).data;
-  g.drawImage(bg, 0, 0);
-  const d = g.getImageData(0, 0, c.width, c.height), p = d.data;
-  for (let i = 0; i < p.length; i += 4) {
-    if (white[i] !== 255 || white[i + 1] !== 255 || white[i + 2] !== 255) continue;
-    for (let k = 0; k < 3; k++) { const v = p[i + k] >> 3, w = v + (((31 - v) * y) >> 4); p[i + k] = (w << 3) | (w >> 2); }
-  }
-  g.putImageData(d, 0, 0);
-  return (FLASHED[key] = c);
-}
+// the backdrop part way through its flash: BG palettes 1-3 y/16 of the way to white, as BlendPalette works it. Every
+// terrain's backdrop is all in palettes 2 and 3, so all of it. (Not picked out by reading back a picture's pixels:
+// a browser guarding against fingerprinting, as Safari does, adds noise to what's read back)
+const flashedBg = (bg, url, y) => blendedImg(bg, url, y, [31, 31, 31]);
 function drawBattleScreen(S, now) {
   const g = S.g;
   g.imageSmoothingEnabled = false;
@@ -1975,8 +2021,7 @@ function drawBattleScreen(S, now) {
       tile(0, 80, I.offset); tile(80, 32, -I.offset);
     }
   } else if (bg) {
-    const flash = S.flash ? bcImg(S.bg.replace(".png", "-flash.png")) : null;  // (a Pokémon coming out: palettes 2-3 to white)
-    g.drawImage(flash ? flashedBg(bg, flash, S.bg, S.flash) : bg, 0, 0);
+    g.drawImage(S.flash ? flashedBg(bg, S.bg, S.flash) : bg, 0, 0);  // (a Pokémon coming out: palettes 2-3 to white)
   }
   drawSprite(g, S.spr.foe, now); drawSprite(g, S.spr.me, now);
   drawSprite(g, S.trn.foe, now); drawSprite(g, S.trn.me, now);
@@ -2000,6 +2045,7 @@ function drawBattleScreen(S, now) {
     if (p.flip) { g.save(); g.translate(px + 8, py); g.scale(-1, 1); g.drawImage(parts, 8 * p.tile, 0, 8, 8, 0, 0, 8, 8); g.restore(); }
     else g.drawImage(parts, 8 * p.tile, 0, 8, 8, px, py, 8, 8);
   }
+  if (S.stripes) drawStripes(g, S.stripes);  // (a level up's: over the Pokémon, blended with it)
   drawHud(g, "foe", S.hud.foe, now); drawHud(g, "me", S.hud.me, now);
   for (const who of ["foe", "me"]) if (SCENE.trays[who]) drawTray(g, who, SCENE.trays[who]);
   if (I && I.state !== 4) {
@@ -2880,7 +2926,7 @@ function blendCursor(g, img, mask, frame, x, y, flash) {  // (BLDALPHA 12, 8 ove
   }
   const top = cg.getImageData(0, 0, 16, 16).data, under = g.getImageData(x, y, 16, 16), u = under.data;
   for (let i = 0; i < top.length; i += 4) {
-    if (!top[i + 3]) continue;
+    if (top[i + 3] < OPAQUE) continue;
     for (let k = 0; k < 3; k++) { const v = Math.min(31, ((top[i + k] >> 3) * 12 + (u[i + k] >> 3) * 8) >> 4); u[i + k] = (v << 3) | (v >> 2); }
   }
   g.putImageData(under, x, y);
@@ -3797,6 +3843,7 @@ const ANIM = {
   },
   withdraw(who) {  // back into the ball (shrinking to its feet, reddening), box gone
     const S = SCREEN.spr[who];
+    SCENE[who] = null;  // (gone: the scene drawn afresh once this is over doesn't bring it back)
     tweenMs(T.withdraw, t => {
       S.scale = 1 - t; S.tint = {color: "#f05030", alpha: t * .7};
       if (t >= 1) { S.visible = false; S.scale = 1; S.tint = null; }
@@ -3820,17 +3867,32 @@ const ANIM = {
     tweenMs(T.status, t => { S.tint = Math.floor(t * 4) % 2 === 0 && t < 1 ? {color, alpha: Math.sin((t * 4 % 1) * Math.PI) * .6} : null; });
     return own(who, T.status);
   },
-  exp(from, to) {  // a pixel a step
-    const H = SCREEN.hud.me, ms = (Math.abs(to - from) + 1) * T.barStep;
+  exp(from, to, trail = 0) {  // a pixel a step, once the sound's been going 13 frames; trail: the wait after (ms)
+    const H = SCREEN.hud.me, screen = SCREEN, lead = gameFrames(EXP_BAR_LEAD), ms = (Math.abs(to - from) + 1) * T.barStep;
     const sound = sfx("exp");  // (SE_EXP while it fills, stopped as it's done: Task_GiveExpWithExpBar)
-    later(() => sfxStop(sound), ms);
-    tweenMs(ms, t => { H.exp = Math.round(from + (to - from) * t); });
-    return own("me", ms);
+    later(() => sfxStop(sound), lead + ms);
+    later(() => { if (SCREEN === screen) tweenMs(ms, t => { H.exp = Math.round(from + (to - from) * t); }); }, lead);
+    return own("me", lead + ms) + trail;
   },
-  levelUp() {
-    const H = SCREEN.hud.me;
-    tweenMs(T.levelUp, t => { H.flash = t < 1 ? .5 * Math.sin(t * Math.PI) : 0; });
-    return T.levelUp;
+  levelUp(update, stripes) {
+    // Special_LevelUp: SE_EXP_MAX, the box's flash (2/16 a frame up to 16 and back down, showing from its 4th frame), then
+    // the box shows the new level (update: Task_UpdateLvlInHealthbox, once the flash is done); then, if the Pokémon
+    // shows, the stripes rise over it (SE_RS_SHOP as they start)
+    const H = SCREEN.hud.me, S = SCREEN.spr.me, screen = SCREEN;
+    if (stripes) bcImg("/world/battle_ui/level_up_stripe.png");
+    const last = stripes ? STRIPES_FROM + 2 * (STRIPE_COUNT - 1) + 2 + Math.ceil(65 * 16 / 0x20) : 0;  // (past the slowest's end)
+    playFrames(f => {
+      if (SCREEN !== screen) return true;
+      if (f === 1) sfx("exp_max");
+      const k = f - 4, y = k < 0 ? 0 : k < 8 ? 2 * (k + 1) : Math.max(0, 32 - 2 * (k + 1));
+      H.flash = y;
+      if (f === 21) update();
+      if (stripes && f === STRIPES_FROM) sfx("level_up_stripes");
+      const over = f >= Math.max(21, last);
+      screen.stripes = stripes && !over && f > STRIPES_FROM ? {f, x: S.x + 32, y: S.y + 32} : null;
+      return over;
+    });
+    return gameFrames(stripes ? LEVEL_UP_FRAMES : LEVEL_UP_BOX_FRAMES);
   },
 };
 function syncHudOnly(who, m) {
@@ -4579,12 +4641,12 @@ const GBA = {
           n++;
         };
         const s = (y * 240 + x) * 4, mx = x - x % mos, bi = ((by << 8) + ((mx + h) & 255)) * 4;
-        if (spr && mask & 0x10 && spr[s + 3]) take(0x10, true, spr, s);
-        if (bg0 && mask & 1) { const i = ((y << 8) + ((x + h0) & 255)) * 4; if (bg0[i + 3]) take(1, false, bg0, i); }
-        if (n < 2 && mask & 0x10 && hi[s + 3]) take(0x10, true, hi, s);
-        if (n < 2 && mask & 2 && bg1[bi + 3]) take(2, false, bg1, bi);
-        if (n < 2 && mask & 0x10 && lo[s + 3]) take(0x10, true, lo, s);
-        if (n < 2 && mask & 4 && bg2[bi + 3]) take(4, false, bg2, bi);
+        if (spr && mask & 0x10 && spr[s + 3] >= OPAQUE) take(0x10, true, spr, s);
+        if (bg0 && mask & 1) { const i = ((y << 8) + ((x + h0) & 255)) * 4; if (bg0[i + 3] >= OPAQUE) take(1, false, bg0, i); }
+        if (n < 2 && mask & 0x10 && hi[s + 3] >= OPAQUE) take(0x10, true, hi, s);
+        if (n < 2 && mask & 2 && bg1[bi + 3] >= OPAQUE) take(2, false, bg1, bi);
+        if (n < 2 && mask & 0x10 && lo[s + 3] >= OPAQUE) take(0x10, true, lo, s);
+        if (n < 2 && mask & 4 && bg2[bi + 3] >= OPAQUE) take(4, false, bg2, bi);
         for (let k = 0; k < 3; k++) {
           const f1 = o1 ? 3 + k : k, f2 = o2 ? 3 + k : k;
           c1[k] = luts[f1][a1 ? a1[i1 + k] >> 3 : 0];  // (the backdrop: black)
@@ -5321,7 +5383,7 @@ Object.assign(TransitionMachine.prototype, {
         const tx = ((pa * (ix - 16) + pb * (iy - 16)) >> 8) + 16, ty = ((pc * (ix - 16) + pd * (iy - 16)) >> 8) + 16;
         if (tx < 0 || ty < 0 || tx >= 32 || ty >= 32) continue;
         const i = (ty * 32 + tx) * 4, o = (y * 240 + x) * 4;
-        if (!src[i + 3]) continue;
+        if (src[i + 3] < OPAQUE) continue;
         out[o] = src[i]; out[o + 1] = src[i + 1]; out[o + 2] = src[i + 2]; out[o + 3] = 255;
       }
     }
@@ -9996,7 +10058,7 @@ function tmapCompose(g, T) {
     const p = (y * 240 + x) * 4;
     let n = 0, b1 = 32, b2 = 32, d1 = null, d2 = null, i1 = 0, i2 = 0;
     for (const [d, bit, off] of order) {
-      if (!d || !(mask & bit) || !d[p + off + 3]) continue;
+      if (!d || !(mask & bit) || d[p + off + 3] < OPAQUE) continue;
       if (n === 0) { d1 = d; b1 = bit; i1 = p + off; } else { d2 = d; b2 = bit; i2 = p + off; }
       if (++n === 2) break;
     }

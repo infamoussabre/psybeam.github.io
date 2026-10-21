@@ -3,7 +3,7 @@
 // doesn't (down, or no network), so invite links and QR codes still open the game. The game itself never comes
 // from here: it talks straight to the host's server, and keeps the host's files in a cache of its own
 // ("psybeam-files-sealed"), which this leaves alone.
-const CACHE = "psybeam-site-0.1.460-8c7661c404";
+const CACHE = "psybeam-site-0.1.469-5bd92e8d3b";
 const SHELL = ["./", "play/", "manifest.webmanifest", "icon-180.png", "icon-192.png", "icon-512.png"];
 const WAIT_MS = 4000;  // (the site this slow: the kept copy, rather than waiting on)
 
