@@ -333,7 +333,12 @@ function log(line) {
 window.addEventListener("error", e => log("page error: " + e.message + (e.filename ? ` (line ${e.lineno})` : "")));
 window.addEventListener("unhandledrejection", e => log("page error: " + ((e.reason && e.reason.message) || e.reason)));
 $("#eventsLog").addEventListener("toggle", () => { const d = $("#log"); d.scrollTop = d.scrollHeight; });  // (opened: the latest)
+// what may change the wild Pokémon ahead (a REPEL, a flute, the party's lead, its level...): the server's word on them
+// (WORLD.ahead) is out of date till it's asked again (aheadAsk), and meanwhile none is taken for a battle to come
+const ENCOUNTER_CHANGERS = ["use_item", "item_answer", "give_item", "take_item", "toss_item", "switch_mons", "release_mon",
+                            "heal", "nurse", "grow", "soft_boiled", "field_go"];
 function send(msg) {
+  if (ENCOUNTER_CHANGERS.includes(msg.type) && WORLD.ahead) WORLD.ahead.stale = true;
   return new Promise((resolve, reject) => {
     msg.id = nextId++;
     pending[msg.id] = {resolve, reject};
@@ -342,7 +347,7 @@ function send(msg) {
 }
 // what this copy of the page speaks (bumped by hand, with the server's, when a change needs the other side to have
 // it too): a server behind it turns it away; one ahead of it tells it to reload. Builds otherwise get along
-const PROTOCOL = 5;
+const PROTOCOL = 6;
 // the server to join: an invite (psybeam/invite.py), from this page's link (#s=…), else the one last joined in this
 // browser. It's all the page needs to reach the server straight (WebRTC): its address, its UDP port and its
 // certificate's fingerprint (the browser refuses any server whose certificate isn't that one). s: its text, kept
@@ -439,7 +444,7 @@ function toggleHelp() { SHOW_HELP = !SHOW_HELP; store.set(HELP_KEY, SHOW_HELP ? 
 let SERVER_NAME = store.get(NAME_KEY) || "";
 setTimeout(() => setTitle());  // (once the rest of this script's run)
 // the page's title: "Psybeam v<version> - <server name>" (the version: the server's, filled in as it serves the page)
-const VERSION = "0.1.489";
+const VERSION = "0.1.493";
 if (!VERSION.startsWith("__")) $("#verNum").textContent = "v" + VERSION;  // (bottom left, as the player's id is bottom right)
 function markStale(stale, note = "Reload the app to update") {  // this page's PROTOCOL isn't the server's: red,
   $("#ver").classList.toggle("stale", stale);                       // with how to fix it
@@ -1096,7 +1101,7 @@ function enqueue(m) {
     WORLD.party = null; WORLD.start = null; WORLD.shade = null;  // (and the menus close)
     SHOWN = Object.assign({}, b, {waiting_for: null});
     // a battle just starting, from the world: first the game's transition into it
-    if ((m.events || []).some(e => e.type === "battle_started")) startTransition(b.transition, pump);
+    if ((m.events || []).some(e => e.type === "battle_started") && !encounterTaken(b, battleArt(m), pump)) startTransition(b.transition, pump, battleArt(m));
   }
   const more = assemble(m.events, b);
   PLAY.push(...more, {state: b});
@@ -1801,11 +1806,25 @@ function expPx(m) {
 // menus (drawTextLayer; tapped where the game draws them: battleTap). The lists we have for now in place of the
 // game's party and bag screens are HTML over it (.over). Each thing on it is a little model the animations change
 // (SCREEN.spr, trn, hud, ui; SCENE.trays).
-const BC_IMG = {};  // url -> {img} (loaded once)
-function bcImg(url) {
+const BC_IMG = {};  // url -> {img, loaded: a promise, settled either way} (loaded once)
+function bcImg(url) { return bcEntry(url).img; }
+function bcEntry(url) {
   let e = BC_IMG[url];
-  if (!e) { e = BC_IMG[url] = {img: null}; loadImage(url).then(i => { e.img = i; }, () => { e.failed = true; }); }
-  return e.img;
+  if (!e) { e = BC_IMG[url] = {img: null}; e.loaded = loadImage(url).then(i => { e.img = i; }, () => { e.failed = true; }); }
+  return e;
+}
+// What a battle's opening shows, from its first message: the Pokémon sent out, the trainers, the backdrop and its
+// streaks. All asked for at once as the transition starts; it waits on black for them (BATTLE_ART_WAIT_MS at most)
+const BATTLE_ART_WAIT_MS = 15000;
+function battleArt(m) {
+  const b = m.battle, mine = s => b.kind === "pvp" ? s === b.your_side : s === "player";
+  const bg = b.background || "grass", entry = ENTRY_TERRAINS.includes(b.background) ? b.background : "building";
+  const urls = [`/world/battle_bg/${bg}.png`, `/world/battle_bg/${bg}-wide.png`, `/world/battle_bg/${entry}-entry.png`];
+  for (const e of m.events || []) if (e.type === "send_out" && e.mon) urls.push(spriteUrl(e.mon, mine(e.side) ? "me" : "foe"));
+  const t = b.trainers || {};
+  if (t.me != null) urls.push(`/world/trainer/back/${t.me}.png`);
+  if (t.foe != null) urls.push(`/world/trainer/front/${t.foe}.png`);
+  return Promise.race([Promise.all(urls.map(u => bcEntry(u).loaded)), new Promise(ok => setTimeout(ok, BATTLE_ART_WAIT_MS))]);
 }
 function buildScreen(B) {
   const el = $("#battle");
@@ -4631,7 +4650,7 @@ function waitingOn(p) {
   return p;
 }
 function drawLoading(g, now) {
-  let since = WORLD.hold ? WORLD.hold.since : Infinity;
+  let since = WORLD.hold && !WORLD.hold.quiet ? WORLD.hold.since : Infinity;
   for (const w of LOADING) since = Math.min(since, w.since);
   const ball = now - since >= LOADING_SHOW_MS && bcImg("/world/battle_ui/ball_poke.png");
   if (!ball) return;
@@ -5474,9 +5493,11 @@ function cameraScroll() {
 }
 function resetRing() { const me = WORLD.me; WORLD.ring = me && {map: me.map, x: me.x, y: me.y}; }
 const BATTLE_LOAD_FRAMES = 41;  // (from the transition's end to the battle screen starting to open: measured)
-async function startTransition(name, then) {
-  if (!name || !(T.transitionFrame > 0) || !WORLD.started) { then(); return; }
-  TRANSITION = {machine: null, frames: 0, then};
+// (ready: what the battle needs before it opens, fetched meanwhile: past the transition, the screen stays black till it's in)
+async function startTransition(name, then, ready = Promise.resolve()) {
+  if (!name || !(T.transitionFrame > 0) || !WORLD.started) { waitingOn(ready).then(then); return; }
+  const X = TRANSITION = {machine: null, frames: 0, then, ready, isReady: false};
+  ready.then(() => { X.isReady = true; });
   try { await loadTransitions(); } catch (e) { endTransition(); return; }
   if (!TRANSITION) return;
   TRANSITION.machine = new TransitionMachine(name, cameraScroll());
@@ -5491,9 +5512,14 @@ function transitionTick() {
     if (X.machine) {
       X.machine.step();
       if (X.machine.done) { X.machine = null; X.black = X.frames; }
-    } else if (X.frames - X.black >= BATTLE_LOAD_FRAMES) { endTransition(); return; }
+    } else if (X.frames - X.black >= BATTLE_LOAD_FRAMES) {
+      if (X.isReady) { endTransition(); return; }
+      if (!X.waited) { X.waited = true; waitingOn(X.ready); }  // (black, the loading Poké Ball in its corner)
+      break;
+    }
   }
   drawWorld();
+  drawLoading($("#worldScreen").getContext("2d"), performance.now());
   nextFrame(transitionTick);
 }
 // ---- out of a battle: it fades out, a moment's black, the world fades back in -------------------------------
@@ -5549,9 +5575,10 @@ function fieldFadeIn(g, now) {
   for (let i = 0; i < d.length; i += 4) { d[i] = lut[d[i]]; d[i + 1] = lut[d[i + 1]]; d[i + 2] = lut[d[i + 2]]; }
   g.putImageData(img, 0, 0);
 }
-function endTransition() {  // (also when the page is hidden: on to the battle at once)
+function endTransition() {  // (also when the page is hidden: on to the battle at once, once it has what it shows)
   const X = TRANSITION;
   if (!X) return;
+  if (!X.isReady) { X.ready.then(() => { if (TRANSITION === X) endTransition(); }); return; }
   TRANSITION = null;
   X.then();
 }
@@ -6267,6 +6294,7 @@ function worldTick(now) {
   if (WORLD.growLeft && !WORLD.growing && canWalk() && !WORLD.waiting && !moving(me, now) && !STICK) growNext();
   if (WORLD.hold && now > WORLD.hold.until) WORLD.hold = null;  // (never heard: on you go)
   if (me && WORLD.started) aheadAsk(me, now);
+  if (WORLD.encounter && !WORLD.encounter.started && me && !moving(me, now) && !TRANSITION && !SHOWN) encounterStart(now);
   if (me && !WORLD.waiting && !WORLD.hold && !WORLD.dialog && !WORLD.busy && !WORLD.start && !WORLD.shade && !WORLD.party && !me.waiting && !me.tele && !moving(me, now)) {
     const dir = WORLD.order[WORLD.order.length - 1];
     // standing still, a new direction first turns you (as in the game); already walking, you just go
@@ -6337,9 +6365,14 @@ const AHEAD_HOLD_MS = 5000;  // (the longest a stop waits for its check)
 function aheadGot(m) {
   const a = WORLD.ahead;
   if (a && a.after != null && m.after != null && m.after < a.after) return;  // (an older word, arriving late)
-  for (const [map, grounds] of Object.entries(m.wild || {})) WORLD.grounds[`${map}|${m.surfing ? 1 : 0}`] = grounds.map(g => g.tiles);
+  for (const [map, grounds] of Object.entries(m.wild || {})) {
+    WORLD.grounds[`${map}|${m.surfing ? 1 : 0}`] = grounds.map(g => g.tiles);
+    for (const g of grounds) if (g.foe) bcEntry(spriteUrl(g.foe, "foe"));  // (a wild Pokémon to come: its picture, now)
+  }
   WORLD.ahead = m;
   if (m.after != null) WORLD.aheadSteps = WORLD.aheadSteps.filter(s => s.id > m.after);
+  const E = WORLD.encounter;
+  if (E && !E.taken && m.after != null && m.after >= E.id) encounterOff();  // (its step checked, and no battle came)
   if (WORLD.hold && m.after != null && m.after >= WORLD.hold.id) WORLD.hold = null;
 }
 // asked for again when it's not about here (a new map, on or off the water) or out of date (a battle's over)
@@ -6356,23 +6389,63 @@ function aheadStep(id, map, x, y, surfing, now) {
   const a = WORLD.ahead;
   if (a && a.after != null && a.after >= id) return;  // (checked already)
   const m = WORLD.loaded[map], grounds = WORLD.grounds[`${map}|${surfing ? 1 : 0}`];
-  let key = null, stop = false;
+  let key = null, stop = false, encounter = null;
   if (!(a && a.wild === null) && m && x >= 0 && y >= 0 && x < m.width && y < m.height) {
     const t = m.blocks[x + y * m.width] & 0x3FF, i = grounds ? grounds.findIndex(g => g.includes(t)) : -1;
     key = !grounds ? "?" : i >= 0 ? `${map}|${surfing ? 1 : 0}|${i}` : null;
-    if (key) {  // (the server's word holds while every step since has been on this same ground)
+    if (key) {  // (the server's word holds while every step since has been on this same ground, and nothing's changed)
       const since = WORLD.aheadSteps.filter(s => !a || a.after == null || s.id > a.after);
-      const told = a && a.surfing === surfing && a.wild && a.wild[map] && since.every(s => s.key === key) && i >= 0 ? a.wild[map][i] : null;
+      const told = a && !a.stale && a.surfing === surfing && a.wild && a.wild[map] && since.every(s => s.key === key) && i >= 0 ? a.wild[map][i] : null;
       const k = since.length + 1;
       stop = !told || (told.hit !== null ? k >= told.hit : k > a.depth);
+      if (told && told.hit === k && told.transition) encounter = {id, transition: told.transition};
     }
   }
   if (key) WORLD.aheadSteps.push({id, key});
-  if (stop || sightStops(map, x, y)) WORLD.hold = {id, until: now + AHEAD_HOLD_MS, since: now};
+  const seen = sightStops(map, x, y);
+  if (encounter && !seen) {  // a wild Pokémon appears here: the battle's transition starts as you arrive (encounterStart)
+    WORLD.encounter = encounter;
+    WORLD.hold = {id, until: Infinity, since: now, quiet: true};  // (no loading Poké Ball over it: the transition's playing)
+  } else if (stop || seen) WORLD.hold = {id, until: now + AHEAD_HOLD_MS, since: now};
+}
+// The wild battle your step brings (the server rolled it, and told you: aheadGot), started here as you arrive:
+// its transition plays while the server checks the step and sets the battle up; when the battle comes (enqueue),
+// it opens as soon as the transition's done and the battle's pictures are in. ENCOUNTER_WAIT_MS without it, or
+// the server saying the step brought none after all: the screen comes back from black, and you walk on.
+const ENCOUNTER_WAIT_MS = 15000;
+function encounterStart(now) {
+  const E = WORLD.encounter;
+  E.started = true;
+  const battle = new Promise(ok => { E.arrive = ok; });  // (resolves with what the battle needs to open: battleArt)
+  startTransition(E.transition, () => { if (WORLD.encounter === E) WORLD.encounter = null; E.then(); }, battle);
+  E.transitionOf = TRANSITION;
+  E.timer = setTimeout(() => { if (WORLD.encounter === E && !E.taken) encounterOff(); }, ENCOUNTER_WAIT_MS);
+}
+// its battle came (enqueue): taken up by the transition already playing. False: there's none to take it up
+function encounterTaken(b, art, then) {
+  const E = WORLD.encounter;
+  if (!E || !E.started || E.taken || b.kind !== "wild" || TRANSITION !== E.transitionOf) { encounterOff(); return false; }
+  E.taken = true;
+  clearTimeout(E.timer);
+  E.then = then;
+  E.arrive(art);
+  return true;
+}
+function encounterOff() {  // (none came after all)
+  const E = WORLD.encounter;
+  if (!E) return;
+  WORLD.encounter = null;
+  clearTimeout(E.timer);
+  if (E.started && TRANSITION && TRANSITION === E.transitionOf) {
+    TRANSITION = null;
+    WORLD.fadeIn = {start: performance.now()};  // (back from black, as after a battle)
+  }
+  if (WORLD.hold && WORLD.hold.id === E.id) WORLD.hold = null;
 }
 // your step `id` wasn't one the server checks after: not counted, and not waited for
 function aheadUnstep(id) {
   WORLD.aheadSteps = WORLD.aheadSteps.filter(s => s.id !== id);
+  if (WORLD.encounter && WORLD.encounter.id === id && !WORLD.encounter.taken) encounterOff();  // (not where it was to be)
   if (WORLD.hold && WORLD.hold.id === id) WORLD.hold = null;
 }
 // would a trainer see you on (map, x, y)? Where they stand and face now (they turn), as far as the server says they see
