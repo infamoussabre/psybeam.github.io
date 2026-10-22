@@ -347,7 +347,7 @@ function send(msg) {
 }
 // what this copy of the page speaks (bumped by hand, with the server's, when a change needs the other side to have
 // it too): a server behind it turns it away; one ahead of it tells it to reload. Builds otherwise get along
-const PROTOCOL = 12;
+const PROTOCOL = 13;
 // the server to join: an invite (psybeam/invite.py), from this page's link (#s=…), else the one last joined in this
 // browser. It's all the page needs to reach the server straight (WebRTC): its address, its UDP port and its
 // certificate's fingerprint (the browser refuses any server whose certificate isn't that one). s: its text, kept
@@ -444,7 +444,7 @@ function toggleHelp() { SHOW_HELP = !SHOW_HELP; store.set(HELP_KEY, SHOW_HELP ? 
 let SERVER_NAME = store.get(NAME_KEY) || "";
 setTimeout(() => setTitle());  // (once the rest of this script's run)
 // the page's title: "Psybeam v<version> - <server name>" (the version: the server's, filled in as it serves the page)
-const VERSION = "0.1.513";
+const VERSION = "0.1.515";
 if (!VERSION.startsWith("__")) $("#verNum").textContent = "v" + VERSION;  // (bottom left, as the player's id is bottom right)
 function markStale(stale, note = "Reload the app to update") {  // this page's PROTOCOL isn't the server's: red,
   $("#ver").classList.toggle("stale", stale);                       // with how to fix it
@@ -1614,8 +1614,8 @@ const FONT_SUBST = {"'": "’", "\"": "”"};
 // through their subsprite tables; 4-6: the message box's B button, ringed; 7: the balls' sine table and open
 // frame; 8: the party menu's words in battle; 9: its words for a Pokémon's menu, the summary screen's move cursor;
 // 12: the Trainer Card's front alone, its background apart, for turning it over; 13: the start menu's OPTION;
-// 14: sprites' inanimate)
-const WORLD_DATA = 14;
+// 14: sprites' inanimate; 15: sprites whose pieces reach past their box, whole: the S.S. ANNE)
+const WORLD_DATA = 15;
 // ---- the game's sound effects (frapi.sounds): the server renders them from the ROM, a WAV a category (UI, overworld,
 // battle, jingles), each with where its sounds are in it; /world/sounds.json says what there is (and the names of the
 // songs the game's scripts play: sfxSong). Fetched from the first press or click (a page can't start sound before one),
@@ -6419,7 +6419,7 @@ function aheadStep(id, map, x, y, surfing, now) {
     }
   }
   if (key) WORLD.aheadSteps.push({id, key});
-  const seen = sightStops(map, x, y);
+  const seen = sightStops(map, x, y) || guardStops(map, x, y);
   if (encounter && !seen) {  // a wild Pokémon appears here: the battle's transition starts as you arrive (encounterStart)
     WORLD.encounter = encounter;
     WORLD.hold = {id, until: Infinity, since: now, quiet: true};  // (no loading Poké Ball over it: the transition's playing)
@@ -6480,6 +6480,11 @@ function sightStops(map, x, y) {
       return (dx ? y === at.y : x === at.x) && d > 0 && d <= (moved ? t.sight : t.reach[f]);
     });
   });
+}
+// is (map, x, y) where a guard stops you (the gate guard's trigger, the S.S. Anne's dock sailor's)? A map not told of: maybe
+function guardStops(map, x, y) {
+  const a = WORLD.ahead, list = a && a.stops && a.stops[map];
+  return !list || list.some(([sx, sy]) => sx === x && sy === y);
 }
 // the server's answer to one of your steps (message `id`)
 async function settleStep(r, guess, id) {
