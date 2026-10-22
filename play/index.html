@@ -347,7 +347,7 @@ function send(msg) {
 }
 // what this copy of the page speaks (bumped by hand, with the server's, when a change needs the other side to have
 // it too): a server behind it turns it away; one ahead of it tells it to reload. Builds otherwise get along
-const PROTOCOL = 6;
+const PROTOCOL = 7;
 // the server to join: an invite (psybeam/invite.py), from this page's link (#s=…), else the one last joined in this
 // browser. It's all the page needs to reach the server straight (WebRTC): its address, its UDP port and its
 // certificate's fingerprint (the browser refuses any server whose certificate isn't that one). s: its text, kept
@@ -444,7 +444,7 @@ function toggleHelp() { SHOW_HELP = !SHOW_HELP; store.set(HELP_KEY, SHOW_HELP ? 
 let SERVER_NAME = store.get(NAME_KEY) || "";
 setTimeout(() => setTitle());  // (once the rest of this script's run)
 // the page's title: "Psybeam v<version> - <server name>" (the version: the server's, filled in as it serves the page)
-const VERSION = "0.1.494";
+const VERSION = "0.1.501";
 if (!VERSION.startsWith("__")) $("#verNum").textContent = "v" + VERSION;  // (bottom left, as the player's id is bottom right)
 function markStale(stale, note = "Reload the app to update") {  // this page's PROTOCOL isn't the server's: red,
   $("#ver").classList.toggle("stale", stale);                       // with how to fix it
@@ -746,11 +746,7 @@ function handlePush(m) {
     return;
   }
   if (m.type === "battle") {
-    BATTLE = m.battle;
-    if (BATTLE.status !== "active" && WORLD.approached) {  // the trainer who came over goes back to their spot
-      Object.assign(WORLD.approached.n, WORLD.approached.home, {anim: null});
-      WORLD.approached = null;
-    }
+    BATTLE = m.battle;  // (a trainer who came over stays there after, as in the game: the server has them there)
     (m.events || []).forEach(e => show(describe(e)));
     enqueue(m);
     if (BATTLE.status !== "active") refreshPlayers();
@@ -1108,6 +1104,7 @@ function enqueue(m) {
   if (NOW === null && (!PRINTER || STANDBY) && !AI_SHOW) pump();  // ("Waiting for NAME…" up: what came ends it)
   else if (more.some(it => it.msg)) catchUp();  // (following the main player's game: their next line is up)
 }
+let HIT_SOUNDED = false;  // a move's hit sound played, for the HP drop that follows it
 function applyEvent(e, b) {
   // update the scene, animate the change; returns how long to wait before going on (ms)
   if (SHOWN) renderScene(SHOWN);
@@ -1129,7 +1126,7 @@ function applyEvent(e, b) {
     later(() => { if (SCREEN) ANIM.levelUp(() => syncHudOnly("me", me), stripes); }, fill);
     return fill + gameFrames(stripes ? LEVEL_UP_FRAMES : LEVEL_UP_BOX_FRAMES);
   }
-  if (e.type === "hit") { sfx(e.effect); return 0; }  // (Cmd_effectivenesssound: as it's hit, the blink just after)
+  if (e.type === "hit") { sfx(e.effect); HIT_SOUNDED = true; return 0; }  // (Cmd_effectivenesssound: as it's hit, the blink just after)
   if (e.type === "sound") { sfxSong(e.song); return 0; }  // (a battle script's playse or fanfare: a level up's, a move learned's)
   if (e.type === "battle_started") return ANIM.trainersIn(b);
   if (e.type === "ball_throw") return mine(e.side) ? ballThrow(e) : 0;  // (a Poké Ball at the foe's Pokémon)
@@ -1148,13 +1145,17 @@ function applyEvent(e, b) {
     return ANIM.sendOut(who, SCENE[who], how, leaving);
   }
   if (e.type === "withdraw") return SCENE[who] ? ANIM.withdraw(who) : 0;
-  if (e.type === "move_used") return SCENE[who] && SCENE[who].hp > 0 ? ANIM.attack(who) : 0;
+  if (e.type === "move_used") { HIT_SOUNDED = false; return SCENE[who] && SCENE[who].hp > 0 ? ANIM.attack(who) : 0; }
   const m = SCENE[who];
   if (!m) return 0;
   if (e.type === "hp_changed") {
     const from = m.hp;
     Object.assign(m, {hp: e.hp, max_hp: e.max_hp});
     if (e.hp < from) {  // hit: blink, then drain
+      // (not a move's hit, with its effectiveness sound: poison, burn, LEECH SEED, recoil, weather... the game's
+      // own sound for those is their status animation's, which isn't drawn here: the plain hit's stands in)
+      if (!HIT_SOUNDED) sfx("effective");
+      HIT_SOUNDED = false;
       const blink = ANIM.blink(who);
       later(() => { if (SCREEN) ANIM.hp(who, from, e.hp, e.max_hp); }, blink);
       return blink + Math.max(8, e.max_hp <= 48 ? from - e.hp : hpPx(from, e.max_hp) - hpPx(e.hp, e.max_hp)) * T.barStep;
@@ -4487,7 +4488,6 @@ const WORLD = {cache: {}, sprites: {}, infos: {}, cur: null, placed: [], cam: {x
                escalators: [],  // escalators moving: [{map, x, y, up, start, limit, done}] (see updateEscalators)
                escTiles: {},  // map id -> {"x,y": metatile}: escalator steps not as the map has them
                emote: null,  // the "!" over a trainer who's seen you: {n, start}
-               approached: null,  // that trainer, come over to you: {n, home: where they stood}
                ahead: null,  // what the server says is ahead of you (aheadGot): where a step would start something
                aheadSteps: [],  // your steps since onto blocks that roll for a wild Pokémon: [{id (the step's message), key}]
                grounds: {},  // "map|surfing" -> those blocks, by metatile, a list per ground the server rolls on alike
@@ -6695,16 +6695,19 @@ async function spotted(m) {
     while (moving(me, performance.now())) await waitFrames(1);  // (your step finishes first)
     const map = WORLD.loaded[m.map], n = map && map.npcs.find(n => n.local_id === m.local_id);
     if (n) {
-      WORLD.approached = {n, home: {x: n.x, y: n.y, facing: n.facing}};
       n.facing = m.facing;
       WORLD.emote = {n, start: performance.now()};
       await waitFrames(EMOTE_FRAMES.reduce((t, [, len]) => t + len, 0));
       WORLD.emote = null;
       const [dx, dy] = STEP[m.facing];
-      for (let i = 1; i < m.distance; i++) {  // up to the block next to you
-        const from = {map: n.map, x: n.x, y: n.y};
-        n.x += dx; n.y += dy;
-        animate(n, from, 16, "walk");
+      for (let i = 1; i < m.distance; i++) {  // up to the block next to you (each step: unless the server's
+        //   telling everyone of it got here first, and it's walking it already: npcs)
+        const x = m.x + dx * i, y = m.y + dy * i;
+        if (n.x !== x || n.y !== y) {
+          const from = {map: n.map, x: n.x, y: n.y};
+          Object.assign(n, {x, y, facing: m.facing});
+          animate(n, from, 16, "walk");
+        }
         await waitFrames(16);
       }
     }
