@@ -347,7 +347,7 @@ function send(msg) {
 }
 // what this copy of the page speaks (bumped by hand, with the server's, when a change needs the other side to have
 // it too): a server behind it turns it away; one ahead of it tells it to reload. Builds otherwise get along
-const PROTOCOL = 7;
+const PROTOCOL = 11;
 // the server to join: an invite (psybeam/invite.py), from this page's link (#s=…), else the one last joined in this
 // browser. It's all the page needs to reach the server straight (WebRTC): its address, its UDP port and its
 // certificate's fingerprint (the browser refuses any server whose certificate isn't that one). s: its text, kept
@@ -444,7 +444,7 @@ function toggleHelp() { SHOW_HELP = !SHOW_HELP; store.set(HELP_KEY, SHOW_HELP ? 
 let SERVER_NAME = store.get(NAME_KEY) || "";
 setTimeout(() => setTitle());  // (once the rest of this script's run)
 // the page's title: "Psybeam v<version> - <server name>" (the version: the server's, filled in as it serves the page)
-const VERSION = "0.1.501";
+const VERSION = "0.1.511";
 if (!VERSION.startsWith("__")) $("#verNum").textContent = "v" + VERSION;  // (bottom left, as the player's id is bottom right)
 function markStale(stale, note = "Reload the app to update") {  // this page's PROTOCOL isn't the server's: red,
   $("#ver").classList.toggle("stale", stale);                       // with how to fix it
@@ -1613,8 +1613,9 @@ const FONT_SUBST = {"'": "’", "\"": "”"};
 // info (or its sprites' pictures) bumps this to fetch it afresh (2: sprites' shadow sizes; 3: sprites drawn
 // through their subsprite tables; 4-6: the message box's B button, ringed; 7: the balls' sine table and open
 // frame; 8: the party menu's words in battle; 9: its words for a Pokémon's menu, the summary screen's move cursor;
-// 12: the Trainer Card's front alone, its background apart, for turning it over; 13: the start menu's OPTION)
-const WORLD_DATA = 13;
+// 12: the Trainer Card's front alone, its background apart, for turning it over; 13: the start menu's OPTION;
+// 14: sprites' inanimate)
+const WORLD_DATA = 14;
 // ---- the game's sound effects (frapi.sounds): the server renders them from the ROM, a WAV a category (UI, overworld,
 // battle, jingles), each with where its sounds are in it; /world/sounds.json says what there is (and the names of the
 // songs the game's scripts play: sfxSong). Fetched from the first press or click (a page can't start sound before one),
@@ -4009,6 +4010,11 @@ function renderBattle() {
   // (a: what A does with no options up; back: what B does)
   const ui = SCREEN.ui = {layout: "message", say: null, opts: [], cursor: null, info: null, back: null, a: null, yn: null};
   const say = t => { ui.say = t || ""; };
+  // what the box still shows once a line's printed: its last page (\f clears the box), its last two lines (\v
+  // scrolls it), without the pause codes; as a YES/NO box comes up under it (STRINGID_ENEMYABOUTTOSWITCHPKMN's two
+  // pages: only "Will NAME change POKéMON?")
+  const boxShows = t => String(t).split("\f").pop().replace(/\x10[\s\S]|\x11/g, "").replace(/\v/g, "\n")
+    .split("\n").slice(-2).join("\n");
   // its options: where the game puts them (spots), the cursor on the one at `at`
   const options = (spots, items, at = 0) => {
     ui.opts = items.map((it, i) => battleOption(it.label, spots[i], it.pick, it));
@@ -4125,12 +4131,12 @@ function renderBattle() {
       ui.opts = [battleOption("STOP", [16, 90], ui.back, {w: 48, backBox: true, hit: [0, 80, 48, 32]})];
     }
   } else if (w.type === "yes_no") {
-    say((w.prompt || []).join(" "));
+    say(boxShows((w.prompt || []).join(" ")));
     yesNo(() => act({action: "yes"}), () => act({action: "no"}));
   } else if (w.type === "nickname") {
     // "Give a nickname to the captured X?": YES/NO (trygivecaughtmonnick, the battle's YES/NO box); YES: the naming
     // screen (its name, or none: the name it has), NO (or B): none
-    say((w.prompt || []).join(" "));
+    say(boxShows((w.prompt || []).join(" ")));
     if (!SCREEN.naming) yesNo(() => namingOpen(w.mon, name => {  // (its battle turn held till the screen's gone)
       CHOSEN = BATTLE.id; SCREEN.hold = true;
       return send({type: "act", battle_id: BATTLE.id, action: {action: "nickname", name}});
@@ -5905,7 +5911,7 @@ function drawPeople(g, people, left, top, now) {  // (sorted top to bottom; shad
     if (tele) dy += tele.dy;
     const bob = drawSurfBlob(g, c, info, dx, dy, left, top, now);  // (surfing: the blob under them; they dip a pixel with it)
     dy += bob;
-    if (facing === "east" && info.frames >= 3) {
+    if (facing === "east" && info.frames >= 3 && !info.inanimate) {
       g.save(); g.translate(dx + info.width, dy); g.scale(-1, 1);
       g.drawImage(img, f * info.width, 0, info.width, info.height, 0, 0, info.width, info.height);
       g.restore();
@@ -5956,6 +5962,8 @@ function drawShadow(g, c, info, x, y, left, top, now) {
 // standing: its facing frame; first half of a step: a walking frame, alternating feet step by step
 const WALK_FRAME = {south: 3, north: 5, west: 7, east: 7};
 function charFrame(c, info, now) {
+  if (info.inanimate) return 0;  // (a thing, a CUT tree or a rock: still whichever way it faces, SetStepAnim; its
+                                 //  other frames are its breaking, breakFrame)
   if (c.pose) {  // a movement that plays frames of its own (walking in place, the nurse's bow): [frame, game frames]
     let t = Math.floor((now - c.pose.start) / FRAME_MS);
     for (const [f, len] of c.pose.seq) { if (t < len) return f; t -= len; }
@@ -6561,6 +6569,7 @@ async function settleStep(r, guess, id) {
   if (WORLD.waiting === id) WORLD.waiting = false;
   if (WORLD.resync && !WORLD.inflight.size) WORLD.resync = false;
   showWorldInfo();
+  if (r.player) { ME = r.player; renderMe(); }  // (the dock sailor's HM01: in their Bag)
   if (r.guard) gateGuard(r.guard);
   else if (r.push) keptOut(r);
 }
@@ -6581,7 +6590,8 @@ async function keptOut(r) {
 // The Route 22 gate's badge guard (guests never have the BOULDER BADGE): stepped onto his trigger, you stop there; he
 // turns to you (walk_in_place_faster: 8 frames), says his piece, and once it's read you're turned away from the door
 // and walked back a step (Route23_Movement_WalkDown), and he faces the way he stands again, as the game does to a
-// player without the badge
+// player without the badge. The S.S. Anne's dock sailor too: you turn to him (gd.turns), and with a ticket, while
+// she's in, there's no walking back (no gd.push)
 async function gateGuard(gd) {
   const me = WORLD.me, token = {};
   WORLD.busy = token;
@@ -6589,12 +6599,15 @@ async function gateGuard(gd) {
     while (moving(me, performance.now())) await waitFrames(1);
     const m = WORLD.loaded[me.map], n = m && m.npcs.find(c => c.local_id === gd.local_id);
     if (n && gd.faces) n.facing = gd.faces;
+    if (gd.turns) me.facing = gd.turns;
     await waitFrames(8);
     const d = WORLD.dialog = dialogFrom(gd.say, DIALOGUE_BOX);
     while (WORLD.dialog === d) await waitFrames(1);
-    takeStep(me, gd.push, performance.now());
-    await waitFrames(1);
-    while (moving(me, performance.now()) || WORLD.waiting) await waitFrames(1);
+    if (gd.push) {
+      takeStep(me, gd.push, performance.now());
+      await waitFrames(1);
+      while (moving(me, performance.now()) || WORLD.waiting) await waitFrames(1);
+    }
     if (n) n.facing = n.home.facing;  // (releaseall: he goes back to standing as he does, facing south)
   } catch (e) { log("world: " + e.message); }
   finally { if (WORLD.busy === token) WORLD.busy = null; }
@@ -6610,13 +6623,14 @@ async function talk() {
   WORLD.waiting = true;
   try {
     let r = await send({type: "talk"});
-    if (r.ball) PICKED_BALLS.add(r.ball);  // (an item ball you've picked up: gone, as removeobject takes it before its message)
+    if (r.ball) r.ball.forEach(f => PICKED_BALLS.add(f));  // (item balls you've picked up, a fossil taken: gone, as
+                                                           //  removeobject takes them before its message)
     if (r.player) { ME = r.player; renderMe(); }
     if (!r.lines.length && !r.ask) return;
     sfx("select");  // (something to read or answer: the game's A on it, as its script starts)
     const box = r.kind === "sign" ? SIGN_BOX : DIALOGUE_BOX;
     const m = WORLD.loaded[me.map], n = r.local_id != null && m && m.npcs.find(n => n.local_id === r.local_id);
-    const turns = n && r.faces && (m.sprites[n.gfx] || {}).frames >= 3, faced = n && n.facing;
+    const turns = n && r.faces && (m.sprites[n.gfx] || {}).frames >= 3 && !m.sprites[n.gfx].inanimate, faced = n && n.facing;
     if (turns) n.facing = OPPOSITE_DIR[me.facing];  // they turn to you while talking (if their script does)
     if (r.ask) {  // (a question: answered, what's said after it)
       r = await answerTalk(r, n || null, box);
