@@ -347,7 +347,7 @@ function send(msg) {
 }
 // what this copy of the page speaks (bumped by hand, with the server's, when a change needs the other side to have
 // it too): a server behind it turns it away; one ahead of it tells it to reload. Builds otherwise get along
-const PROTOCOL = 13;
+const PROTOCOL = 14;
 // the server to join: an invite (psybeam/invite.py), from this page's link (#s=…), else the one last joined in this
 // browser. It's all the page needs to reach the server straight (WebRTC): its address, its UDP port and its
 // certificate's fingerprint (the browser refuses any server whose certificate isn't that one). s: its text, kept
@@ -444,7 +444,7 @@ function toggleHelp() { SHOW_HELP = !SHOW_HELP; store.set(HELP_KEY, SHOW_HELP ? 
 let SERVER_NAME = store.get(NAME_KEY) || "";
 setTimeout(() => setTitle());  // (once the rest of this script's run)
 // the page's title: "Psybeam v<version> - <server name>" (the version: the server's, filled in as it serves the page)
-const VERSION = "0.1.515";
+const VERSION = "0.1.517";
 if (!VERSION.startsWith("__")) $("#verNum").textContent = "v" + VERSION;  // (bottom left, as the player's id is bottom right)
 function markStale(stale, note = "Reload the app to update") {  // this page's PROTOCOL isn't the server's: red,
   $("#ver").classList.toggle("stale", stale);                       // with how to fix it
@@ -4498,6 +4498,7 @@ const WORLD = {cache: {}, sprites: {}, infos: {}, cur: null, placed: [], cam: {x
                aheadSteps: [],  // your steps since onto blocks that roll for a wild Pokémon: [{id (the step's message), key}]
                grounds: {},  // "map|surfing" -> those blocks, by metatile, a list per ground the server rolls on alike
                hold: null,  // a step that might start something: {id, until}; no more till the server's checked it
+               talkingTo: null,  // the NPC you're talking to (local id): held still till you're done (talk_done)
                npcLive: {},  // map id -> {local id: {x, y, facing}}: NPCs where the main player's game has them
                inflight: new Set(),  // your steps sent and not yet answered (message ids)
                resync: false}; // the server took one of them otherwise: no more till they're all answered (settleStep)
@@ -6291,6 +6292,10 @@ function worldTick(now) {
   if (REPLACED) { WORLD.paused = true; return; }  // (another window's playing: this one stops until it's back: playHere)
   const me = WORLD.me;
   if (STICK && !canWalk()) stickEnd();  // (walking's not allowed now: the stick goes)
+  if (WORLD.talkingTo != null && !WORLD.waiting && canWalk()) {  // done with whoever you talked to (no box, menu
+    WORLD.talkingTo = null;                                       //  or shop up): they go on (the script's releaseall)
+    send({type: "talk_done"}).catch(e => log("world: " + e.message));
+  }
   shadeTick(now);
   if (SHOWN) { requestAnimationFrame(worldTick); return; }  // (a battle has the screen)
   // brought in after losing: the nurse's healing, once the world's back on the screen, where it's meant to be
@@ -6632,6 +6637,7 @@ async function talk() {
     if (r.ball) r.ball.forEach(f => PICKED_BALLS.add(f));  // (item balls you've picked up, a fossil taken: gone, as
                                                            //  removeobject takes them before its message)
     if (r.player) { ME = r.player; renderMe(); }
+    if (r.local_id != null) WORLD.talkingTo = r.local_id;  // (held still by the server till you're done: talk_done)
     if (!r.lines.length && !r.ask) return;
     sfx("select");  // (something to read or answer: the game's A on it, as its script starts)
     const box = r.kind === "sign" ? SIGN_BOX : DIALOGUE_BOX;
@@ -7645,7 +7651,7 @@ function flowAsk(P, ask) {
     P.say.evolving = ask;
     return;
   }
-  const replace = () => giveAsk(P, ask.text, () => giveSay(P, ask.forget, () => summaryOpen(P, ask)),
+  const replace = () => giveAsk(P, ask.text, () => giveSay(P, ask.forget, () => forgetOpen(P, ask)),
                                 () => giveAsk(P, ask.stop, () => flowAnswer(P, {forget: null}), replace));
   replace();
 }
@@ -7733,7 +7739,7 @@ async function battleSummaryOpen(S, done) {
   };
   requestAnimationFrame(tick);
 }
-async function summaryOpen(P, ask) {
+async function forgetOpen(P, ask) {
   try {
     await summaryAssets(ask.summary);
   } catch (e) {  // (it can't be shown: as if none was picked)
