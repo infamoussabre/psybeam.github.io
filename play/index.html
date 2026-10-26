@@ -347,7 +347,7 @@ function send(msg) {
 }
 // what this copy of the page speaks (bumped by hand, with the server's, when a change needs the other side to have
 // it too): a server behind it turns it away; one ahead of it tells it to reload. Builds otherwise get along
-const PROTOCOL = 15;
+const PROTOCOL = 16;
 // the server to join: an invite (psybeam/invite.py), from this page's link (#s=…), else the one last joined in this
 // browser. It's all the page needs to reach the server straight (WebRTC): its address, its UDP port and its
 // certificate's fingerprint (the browser refuses any server whose certificate isn't that one). s: its text, kept
@@ -444,7 +444,7 @@ function toggleHelp() { SHOW_HELP = !SHOW_HELP; store.set(HELP_KEY, SHOW_HELP ? 
 let SERVER_NAME = store.get(NAME_KEY) || "";
 setTimeout(() => setTitle());  // (once the rest of this script's run)
 // the page's title: "Psybeam v<version> - <server name>" (the version: the server's, filled in as it serves the page)
-const VERSION = "0.1.520";
+const VERSION = "0.1.522";
 if (!VERSION.startsWith("__")) $("#verNum").textContent = "v" + VERSION;  // (bottom left, as the player's id is bottom right)
 function markStale(stale, note = "Reload the app to update") {  // this page's PROTOCOL isn't the server's: red,
   $("#ver").classList.toggle("stale", stale);                       // with how to fix it
@@ -1621,7 +1621,8 @@ const WORLD_DATA = 16;
 // songs the game's scripts play: sfxSong). Fetched from the first press or click (a page can't start sound before one),
 // the categories one after another, those needed first first; one not there yet (the server still making them) is
 // quiet, and tried again on the next press. The OPTION screen's SOUND turns them off (and that's kept).
-const SFX = {ctx: null, index: null, at: {}, cats: {}, loading: false, on: store.get("psybeam_sound") !== "off"};
+const SFX = {ctx: null, index: null, at: {}, cats: {}, loading: false, on: store.get("psybeam_sound") !== "off",
+             enhanced: store.get("psybeam_sound_effects") === "enhanced"};  // (the OPTION screen's SOUND EFFECTS)
 const SFX_ORDER = ["ui", "overworld", "battle", "jingles", "cries"];
 function sfxStart() {
   if (!SFX.on) return;
@@ -5756,6 +5757,7 @@ function drawScene(D, left, top, now) {
   const everyone = [...npcs, WORLD.main, ...Object.values(WORLD.others), WORLD.me];
   if (GRASS_IMG) for (const gr of grassEffects(everyone, now)) people.push({grass: gr, y: gr.first ? gr.y - 16.5 : gr.y + 0.5});
   for (const l of landingEffects(everyone, now)) people.push({landing: l, y: l.y + 0.75});
+  if (SPLASH_IMG) for (const sp of splashEffects(everyone, now)) people.push({splash: sp, y: sp.y - 8 + 0.75});
   if (D.only) people = people.filter(p => p.c && D.only(p.c));
   people.sort((a, b) => a.y - b.y);
   // who's under the map's top layer and who's over it: by the height they were last at (sElevationToPriority:
@@ -5926,7 +5928,8 @@ function escapeRopeIn(c, start = performance.now()) {  // (and down, spinning, w
 }
 function drawPeople(g, people, left, top, now) {  // (sorted top to bottom; shadows first, under them all)
   for (const {c, info, x, y} of people) if (c) drawShadow(g, c, info, x, y, left, top, now);
-  for (const {c, info, x, y, lift, grass, landing} of people) {
+  for (const {c, info, x, y, lift, grass, landing, splash} of people) {
+    if (splash) { g.drawImage(SPLASH_IMG, splash.splash * 16, 0, 16, 8, Math.round(splash.x - left), Math.round(splash.y - top), 16, 8); continue; }
     if (landing) {  // (centred across the block, its middle e.y down it)
       const {e, img, frame} = landing.landing;
       g.drawImage(img, frame * e.width, 0, e.width, e.height, landing.x + 8 - e.width / 2 - left, landing.y + e.y - e.height / 2 - top, e.width, e.height);
@@ -6021,6 +6024,7 @@ function charFrame(c, info, now) {
 function animate(c, from, frames, kind, now = performance.now()) {
   c.anim = {map: from.map, x: from.x, y: from.y, start: now, end: now + frames * FRAME_MS, kind};
   c.stride = (c.stride || 0) + 1;
+  stepBegins(c, from, kind, now);
 }
 // ---- doors: they open and close as in the game (src/field_door.c) -----------------------------------
 // A door is a block with the door behavior whose metatile has frames in the game's door table (the first
@@ -6244,6 +6248,53 @@ function landingEffects(chars, now) {  // keeps WORLD.landings current; returns 
   for (const l of WORLD.landings) {
     const e = LANDINGS.effects[l.name], to = placedOffset(l.map), img = LANDING_IMGS[l.name];
     if (to && img) out.push({x: to[0] + l.x * 16, y: to[1] + l.y * 16, landing: {e, img, frame: Math.floor((now - l.start) / (e.step * FRAME_MS))}});
+  }
+  return out;
+}
+// ---- wet feet: puddles and shallow flowing water (GetGroundEffectFlags_Puddle, _ShallowFlowingWater) -----------
+// A step's start with both blocks puddles, and its end on one (but landing from a jump), splashes (FldEff_Splash:
+// its 2 frames, 4 game frames each, with SE_PUDDLE); standing in shallow flowing water, or stepping along it, the
+// same splash at their feet goes round (FldEff_FeetInFlowingWater: anim 1), with SE_PUDDLE as it starts and at each
+// step's start after. Both follow whoever it is, centred on them, their bottom at their feet, just in front of them.
+// The sounds are only for your own steps. And, with SOUND EFFECTS ENHANCED (SFX.enhanced), the sounds the game never
+// had: each of your steps (walking or running, not surfing) as it starts, by the block stepped onto: tall grass's,
+// SE_BALL_TRAY_ENTER; anywhere else dry, SE_BALL_TRAY_EXIT (a puddle or shallow water already has its own).
+const MB_PUDDLE = 0x16, MB_SHALLOW_WATER = 0x17, SPLASH_STEP_FRAMES = 4;
+const FLOWING_FRAMES = [[0, 4], [1, 4], [0, 6], [1, 6], [0, 8], [1, 8], [0, 6], [1, 6]];  // (sAnim_Splash_1, round and round)
+let SPLASH_IMG = null;
+loadImage("/world/effect/splash.png").then(img => { SPLASH_IMG = img; }, () => {});
+function behaviorAt(map, x, y) {
+  const m = WORLD.loaded[map];
+  return m && x >= 0 && y >= 0 && x < m.width && y < m.height ? m.behaviors[m.blocks[x + y * m.width] & 0x3FF] : -1;
+}
+function stepBegins(c, from, kind, now) {  // (animate: c is on its new block)
+  if (kind === "jump" || c.surfing) return;
+  const to = behaviorAt(c.map, c.x, c.y), was = behaviorAt(from.map, from.x, from.y), mine = c === WORLD.me;
+  if (to === MB_PUDDLE && was === MB_PUDDLE) { c.splash = now; if (mine) sfx("puddle"); }
+  else if (to === MB_SHALLOW_WATER && was === MB_SHALLOW_WATER) { if (mine && c.flowing) sfx("puddle"); }
+  else if (mine && SFX.enhanced && (kind === "walk" || kind === "run") && to !== MB_PUDDLE && to !== MB_SHALLOW_WATER)
+    sfx(MB_TALL_GRASS.includes(to) ? "ball_tray_enter" : "ball_tray_exit");
+}
+function splashEffects(chars, now) {  // returns what to draw: [{x, y, splash: frame}]
+  const out = [];
+  for (const c of chars) {
+    if (!c || away(c) || c.hidden) continue;
+    const a = c.anim, mine = c === WORLD.me, here = behaviorAt(c.map, c.x, c.y);
+    if (a && !a.finished && now >= a.end) {  // a step just finished (just: not one long over, seen only now)
+      a.finished = true;
+      if (a.kind !== "jump" && !c.surfing && here === MB_PUDDLE && now - a.end < 1000) { c.splash = a.end; if (mine) sfx("puddle"); }
+    }
+    const flowing = here === MB_SHALLOW_WATER && !c.surfing && (!moving(c, now) || behaviorAt(a.map, a.x, a.y) === MB_SHALLOW_WATER);
+    if (flowing && !c.flowing) { c.flowing = {start: now}; if (mine) sfx("puddle"); }
+    else if (!flowing) c.flowing = null;
+    let frame = null;
+    if (c.splash != null && now - c.splash < 2 * SPLASH_STEP_FRAMES * FRAME_MS) frame = Math.floor((now - c.splash) / (SPLASH_STEP_FRAMES * FRAME_MS));
+    else if (c.flowing) {
+      let t = Math.floor((now - c.flowing.start) / FRAME_MS) % FLOWING_FRAMES.reduce((n, [, len]) => n + len, 0);
+      for (const [f, len] of FLOWING_FRAMES) { if (t < len) { frame = f; break; } t -= len; }
+    }
+    const at = frame != null && charPixel(c, now);
+    if (at) out.push({x: at[0], y: at[1] + 8, splash: frame});
   }
   return out;
 }
@@ -7074,8 +7125,9 @@ function drawStartMenu(g) {
   }
 }
 // ---- the OPTION screen (option_menu.c): OPTION in the start menu, the game's with its own settings ------------------
-// BATTLE STYLE (SHIFT / SET: kept in their save, as the game's) and SOUND (ON / OFF: this page's sounds, kept in this
-// browser), then CANCEL. It comes up as the party menu does (that screen's machinery, with P.option), with its own
+// BATTLE STYLE (SHIFT / SET: kept in their save, as the game's), SOUND (ON / OFF: this page's sounds, kept in this
+// browser) and ours, SOUND EFFECTS (ORIGINAL / ENHANCED: ENHANCED plays sounds the game never did, as footsteps: SFX.enhanced,
+// kept in this browser too), then CANCEL. It comes up as the party menu does (that screen's machinery, with P.option), with its own
 // timings: from black, 34 frames on it's faded in, 2 levels every other frame (BeginNormalPaletteFade, delay 0). On black
 // (BG palette 0, cleared), BG2's bar across the top (window 2, 30x2, text window palette 2's color 15) with PICK, SWITCH
 // and CANCEL in the small font ending at 228; the title window (26x2 at (2, 3), "OPTION" at (8, 1)) in the standard
@@ -7084,27 +7136,28 @@ function drawStartMenu(g) {
 // x 16 to 224). Up and down go round; left and right change the row's setting, round (held, all of them repeat); A or
 // B closes it (no sounds), kept as it starts fading out, 2 levels every other frame from 3 frames on, then 35 frames of
 // black before the field (and the start menu) come back.
-const OPTION_ROWS = 3, OPTION_IN = 34, OPTION_OPEN = 48, OPTION_BLACK = 51;  // (frames: fading in from; open; closed, black till)
+const OPTION_ROWS = 4, OPTION_IN = 34, OPTION_OPEN = 48, OPTION_BLACK = 51;  // (frames: fading in from; open; closed, black till)
 const OPTION_IMG = {};
+const OPTION_SFX = ["SOUND EFFECTS", "ORIGINAL", "ENHANCED"];  // (ours: not the game's words)
 function optionOpen() {
   const O = START_MENU && START_MENU.option;
   if (!WORLD.me || !O) return;
   for (const [part, key] of [["std_window_frame", "std"], ["keypad_bar", "keys"]])
     if (!OPTION_IMG[key]) loadImage(`/world/battle_ui/${part}.png`).then(img => { OPTION_IMG[key] = img; }, () => {});
   WORLD.party = {phase: "out", t0: performance.now(), held: null,
-                 option: {cursor: 0, values: [ME && ME.battle_style === "shift" ? 0 : 1, SFX.on ? 0 : 1]}};
+                 option: {cursor: 0, values: [ME && ME.battle_style === "shift" ? 0 : 1, SFX.on ? 0 : 1, SFX.enhanced ? 1 : 0]}};
 }
 function optionMove(P, dir) {
   const O = P.option;
   if (P.phase !== "open") return;
   if (dir === "north") O.cursor = (O.cursor + OPTION_ROWS - 1) % OPTION_ROWS;
   else if (dir === "south") O.cursor = (O.cursor + 1) % OPTION_ROWS;
-  else if (O.cursor < 2) O.values[O.cursor] ^= 1;  // (east or west: each has two)
+  else if (O.cursor < 3) O.values[O.cursor] ^= 1;  // (east or west: each has two)
 }
 function optionClose(P) {  // (CloseAndSaveOptionMenu: what's chosen kept)
   if (P.phase !== "open") return;
   Object.assign(P, {phase: "close", t0: performance.now(), held: null});
-  const [style, sound] = P.option.values, battle_style = style ? "set" : "shift";
+  const [style, sound, effects] = P.option.values, battle_style = style ? "set" : "shift";
   if (ME && ME.battle_style !== battle_style)
     send({type: "options", battle_style}).then(r => { ME = r.player; renderMe(); }).catch(e => log("world: " + e.message));
   if (SFX.on !== !sound) {
@@ -7112,12 +7165,14 @@ function optionClose(P) {  // (CloseAndSaveOptionMenu: what's chosen kept)
     store.set("psybeam_sound", SFX.on ? "on" : "off");
     sfxStart();
   }
+  SFX.enhanced = !!effects;
+  store.set("psybeam_sound_effects", SFX.enhanced ? "enhanced" : "original");
 }
 function optionTap(P, [x, y]) {  // (a row: the cursor to it; tapped again, its setting changed, or CANCEL: closed)
   const row = Math.floor((y - 58) / 13);
   if (P.phase !== "open" || x < 16 || x >= 224 || y < 58 || row >= OPTION_ROWS) return;
   if (row !== P.option.cursor) P.option.cursor = row;
-  else if (row === 2) optionClose(P);
+  else if (row === 3) optionClose(P);
   else optionMove(P, "east");
 }
 function optionTick(g, P, now) {
@@ -7162,7 +7217,8 @@ function drawOption(g, O) {
   drawText(g, W.title, "option", 16 + 8, 24 + 1);
   box(frame, 1, 6, 28, 19);
   g.fillStyle = W.fill; g.fillRect(16, 56, 208, 96);
-  const rows = [[W.battle_style[0], W.battle_style[1 + O.values[0]]], [W.sound[0], W.sound[1 + O.values[1]]], [W.cancel, null]];
+  const rows = [[W.battle_style[0], W.battle_style[1 + O.values[0]]], [W.sound[0], W.sound[1 + O.values[1]]],
+                [OPTION_SFX[0], OPTION_SFX[1 + O.values[2]]], [W.cancel, null]];
   rows.forEach(([name, value], i) => {
     drawText(g, name, "option", 16 + 8, 56 + 2 + 13 * i);
     if (value) drawText(g, value, "option_value", 16 + 130, 56 + 2 + 13 * i);
