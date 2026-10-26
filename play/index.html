@@ -347,7 +347,7 @@ function send(msg) {
 }
 // what this copy of the page speaks (bumped by hand, with the server's, when a change needs the other side to have
 // it too): a server behind it turns it away; one ahead of it tells it to reload. Builds otherwise get along
-const PROTOCOL = 14;
+const PROTOCOL = 15;
 // the server to join: an invite (psybeam/invite.py), from this page's link (#s=…), else the one last joined in this
 // browser. It's all the page needs to reach the server straight (WebRTC): its address, its UDP port and its
 // certificate's fingerprint (the browser refuses any server whose certificate isn't that one). s: its text, kept
@@ -444,7 +444,7 @@ function toggleHelp() { SHOW_HELP = !SHOW_HELP; store.set(HELP_KEY, SHOW_HELP ? 
 let SERVER_NAME = store.get(NAME_KEY) || "";
 setTimeout(() => setTitle());  // (once the rest of this script's run)
 // the page's title: "Psybeam v<version> - <server name>" (the version: the server's, filled in as it serves the page)
-const VERSION = "0.1.517";
+const VERSION = "0.1.520";
 if (!VERSION.startsWith("__")) $("#verNum").textContent = "v" + VERSION;  // (bottom left, as the player's id is bottom right)
 function markStale(stale, note = "Reload the app to update") {  // this page's PROTOCOL isn't the server's: red,
   $("#ver").classList.toggle("stale", stale);                       // with how to fix it
@@ -1614,15 +1614,15 @@ const FONT_SUBST = {"'": "’", "\"": "”"};
 // through their subsprite tables; 4-6: the message box's B button, ringed; 7: the balls' sine table and open
 // frame; 8: the party menu's words in battle; 9: its words for a Pokémon's menu, the summary screen's move cursor;
 // 12: the Trainer Card's front alone, its background apart, for turning it over; 13: the start menu's OPTION;
-// 14: sprites' inanimate; 15: sprites whose pieces reach past their box, whole: the S.S. ANNE)
-const WORLD_DATA = 15;
+// 14: sprites' inanimate; 15: sprites whose pieces reach past their box, whole: the S.S. ANNE; 16: the trade scene)
+const WORLD_DATA = 16;
 // ---- the game's sound effects (frapi.sounds): the server renders them from the ROM, a WAV a category (UI, overworld,
 // battle, jingles), each with where its sounds are in it; /world/sounds.json says what there is (and the names of the
 // songs the game's scripts play: sfxSong). Fetched from the first press or click (a page can't start sound before one),
 // the categories one after another, those needed first first; one not there yet (the server still making them) is
 // quiet, and tried again on the next press. The OPTION screen's SOUND turns them off (and that's kept).
 const SFX = {ctx: null, index: null, at: {}, cats: {}, loading: false, on: store.get("psybeam_sound") !== "off"};
-const SFX_ORDER = ["ui", "overworld", "battle", "jingles"];
+const SFX_ORDER = ["ui", "overworld", "battle", "jingles", "cries"];
 function sfxStart() {
   if (!SFX.on) return;
   if (!SFX.ctx) {
@@ -1664,8 +1664,47 @@ function sfx(name) {
   return src;
 }
 function sfxStop(src) { if (src) try { src.stop(); } catch (e) {} }
-// a song the game's scripts play, by its label (se_select, mus_obtain_item...): ours by that name, if we have it
-function sfxSong(label) { const name = SFX.index && SFX.index.songs[label]; return name ? sfx(name) : null; }
+// A Pokémon's cry (PlayCryInternal): its species's (the "cries" WAV: as PlayCry_Normal plays it), in one of the game's
+// modes: its pitch (in 256ths of a semitone, CRY_MODE_NORMAL's 15360) faster or slower; past its length (frames) its
+// release (each frame its loudness r/256 of the last; 0: it stops). pan: -64 (left) to 63; delay: ms from now.
+const CRY_MODES = {normal: [15360, 140, 0], doubles: [15360, 20, 225], encounter: [15600, 140, 225], faint: [14440, 140, 200],
+                   weak: [15000, 140, 0], weak_doubles: [15000, 20, 225]};
+function cry(species, mode = "normal", pan = 0, delay = 0) {
+  const name = SFX.on && SFX.index && SFX.index.categories.cries && SFX.index.categories.cries.species[species];
+  const s = name && SFX.at[name], c = s && SFX.cats[s.cat];
+  if (!c || SFX.ctx.state !== "running") return null;
+  const [pitch, length, release] = CRY_MODES[mode] || CRY_MODES.normal, X = SFX.ctx, t0 = X.currentTime + delay / 1000;
+  const src = X.createBufferSource(), gain = X.createGain(), [start, dur] = s.at, rate = Math.pow(2, (pitch - 15360) / 256 / 12);
+  src.buffer = c.buf;
+  src.playbackRate.value = rate;
+  let node = src.connect(gain);
+  if (X.createStereoPanner) { const p = X.createStereoPanner(); p.pan.value = Math.max(-1, Math.min(1, pan / 64)); node = gain.connect(p); }
+  node.connect(c.gain);
+  const cut = length * FRAME_MS / 1000;
+  if (dur / rate > cut) {  // (cut short: let go, fading)
+    if (release) gain.gain.setTargetAtTime(0, t0 + cut, -FRAME_MS / 1000 / Math.log(release / 256));
+    src.start(t0, start, release ? dur : cut * rate);
+  } else src.start(t0, start, dur);
+  return src;
+}
+// how many frames a cry goes on for (IsCryFinished: 2 after it's over; 0 if it can't be played)
+function cryFrames(species, mode = "normal") {
+  const name = SFX.index && SFX.index.categories.cries && SFX.index.categories.cries.species[species], s = name && SFX.at[name];
+  if (!s) return 0;
+  const [pitch, length] = CRY_MODES[mode] || CRY_MODES.normal, rate = Math.pow(2, (pitch - 15360) / 256 / 12);
+  return Math.min(length, Math.ceil(s.at[1] / rate * 1000 / FRAME_MS)) + 2;
+}
+// the mode a Pokémon cries in coming out of its ball, or in its summary (ShouldPlayNormalMonCry): weaker hurt or ill
+const cryMode = m => m.status && m.status !== "OK" || ["yellow", "red", "empty"].includes(hpLevel(m.hp, m.max_hp)) ? "weak" : "normal";
+// a song the game's scripts play, by its label (se_select, mus_obtain_item...): ours by that name, if we have it; or a
+// Pokémon's cry ("cry:<species>:<mode>": playmoncry's, CRY_MODE_* the mode)
+const CRY_MODE_NAMES = {0: "normal", 1: "doubles", 2: "encounter", 5: "faint", 11: "weak", 12: "weak_doubles"};
+function sfxSong(label) {
+  const c = /^cry:(\d+):(\d+)$/.exec(label);
+  if (c) return cry(+c[1], CRY_MODE_NAMES[c[2]] || "normal");
+  const name = SFX.index && SFX.index.songs[label];
+  return name ? sfx(name) : null;
+}
 // (a phone's browser lets sound start only as a touch is let go, not as it's pressed: pointerup, touchend, click)
 for (const ev of ["pointerdown", "pointerup", "touchend", "click", "keydown"]) document.addEventListener(ev, sfxStart, true);
 // a picture: the server's (a path: /world/…, /sprites/…) over the channel, anything else (data:, blob:) as it is
@@ -2387,7 +2426,7 @@ function dexFrame(D) {
       D.palIdx = D.cursorTimer >> 2;
       if (D.k >= 31) { D.phase = "zoom"; D.k = 0; D.sel = false; D.kept = true; }  // (the outline gone, its colors left)
       break;
-    case "zoom": if (D.k >= 8) { D.phase = "wait"; D.k = 0; D.press = false; } break;  // (the page, then frames 0-5 over it, then gone)
+    case "zoom": if (D.k >= 8) { D.phase = "wait"; D.k = 0; D.press = false; cry(D.e.species); } break;  // (its cry, as its page is up)  // (the page, then frames 0-5 over it, then gone)
     case "wait": if (D.press) { D.phase = "close"; D.k = 0; } D.press = false; break;
     case "close": if (D.k >= 18) { D.phase = "battle_in"; D.k = 0; SCREEN.afterDex = D.e; } break;  // (to black)
     case "battle_in": if (D.k >= 20) D.phase = "done"; break;  // (the battle back from black: its picture)
@@ -3430,7 +3469,7 @@ function ballSendOut(who, m, name, throwIt, wait) {
     }
     // the tasks: the particles' (what they make shows from the next frame)
     if (!taskDone && !lags.tasks.includes(k)) {
-      if (kt === -1) sfx("ball_open");
+      if (kt === -1) { sfx("ball_open"); cry(m.id, cryMode(m), who === "me" ? -25 : 25, 4 * FRAME_MS); }  // (Task_PlayCryWhenReleasedFromBall)
       const made = task(taskData, ++kt);
       if (!made) taskDone = true;
       else for (const p of made) {
@@ -3836,6 +3875,7 @@ const ANIM = {
     // the faint cry and a pause, then the sprite sinks out of view, cut off at its feet, and the info box
     // disappears (BattleScript_FaintTarget, SpriteCB_AnimFaintOpponent)
     const S = SCREEN.spr[who], H = SCREEN.hud[who];
+    if (SCENE[who]) cry(SCENE[who].id, "faint", who === "me" ? -25 : 25);  // (OpponentHandleFaintingCry, PlayerHandleFaintingCry)
     later(() => sfx("faint"), T.faintPause);
     later(() => tweenMs(T.faintSink, t => {
       S.sink = 8 * Math.min(8, Math.floor(t * 8));
@@ -3863,6 +3903,7 @@ const ANIM = {
     if (how === "slide") {  // wild battle intro: slides in from the left, before "Wild X appeared!"
       S.visible = true; H.visible = false; S.scale = 1; S.white = 0;
       const ms = introSlide(S, -1, true);  // (shaded until it's in: SpriteCB_EnemyMon)
+      cry(m.id, "normal", 25, ms);  // (as it's in: SpriteCB_MoveWildMonToRight)
       return own(who, ANIM.hudIn(who, ms));
     }
     S.visible = false; H.visible = false;
@@ -6646,6 +6687,7 @@ async function talk() {
     if (turns) n.facing = OPPOSITE_DIR[me.facing];  // they turn to you while talking (if their script does)
     if (r.ask) {  // (a question: answered, what's said after it)
       r = await answerTalk(r, n || null, box);
+      if (r && r.trade) await tradeScene(r.trade);  // (an in-game trade: its scene, then what they say after it)
       if (!r || !r.lines.length) { if (turns) n.facing = faced; return; }
     }
     const d = dialogFrom(r, box);
@@ -6669,7 +6711,19 @@ async function answerTalk(r, n, box) {
   R.home = n && n.facing;
   try {
     while (r.ask) {
-      const d = R.say(r, true), q = r.ask;
+      const q = r.ask;
+      if (q.kind === "party") {  // (ChoosePartyMon: the party menu, "Choose a POKéMON."; A on one picks it, B: SLOT_CANCEL)
+        if (r.lines.length) { const d = Object.assign(R.say(r, true), {box}); await R.until(() => R.typed(d)); }
+        R.cur = null;
+        const P = {phase: "out", t0: performance.now(), cursor: 0, last: 0, held: null, toWorld: true, choose: true, chosen: PARTY_CANCEL};
+        await new Promise(ok => { WORLD.afterParty = ok; WORLD.party = P; });
+        answers.push(P.chosen);
+        r = await send({type: "talk", answers, local_id: localId});
+        if (r.player) { ME = r.player; renderMe(); }
+        if (!r.lines.length && !r.ask) WORLD.dialog = null;
+        continue;
+      }
+      const d = R.say(r, true);
       d.box = box;
       await R.until(() => R.typed(d));
       await R.wait(q.kind === "yesno" ? 5 : 0);  // (Task_YesNoMenu_HandleInput's 5 frames before it takes a press)
@@ -7905,6 +7959,7 @@ function summaryStep(P, now) {
   if (S.phase === "out" && sumFrames(S.t0, now) >= 9 && (S.mons || S.failed)) {
     if (S.failed) { Object.assign(S, {phase: "back", t0: now}); return false; }
     Object.assign(S, {phase: "in", t0: now, bounce: now});
+    sumCry(S.mons[S.index]);
   }
   if (S.phase === "in" && sumFrames(S.t0, now) >= 9) Object.assign(S, {phase: "open", t0: now});
   if (S.phase === "close" && sumFrames(S.t0, now) >= 9) {
@@ -7920,6 +7975,9 @@ function summaryStep(P, now) {
   }
   if (S.sw && sumFrames(S.sw.t0, now) >= 13) S.sw = null;
   return true;
+}
+function sumCry(m, delay = 0) {  // PokeSum_TryPlayMonCry (not an Egg's)
+  if (!m.egg) cry(m.species, cryMode({status: m.ailment, hp: m.hp, max_hp: m.max_hp}), 0, delay);
 }
 function summaryFade(g, S, now) {  // (the party menu under it, to black and back)
   const f = sumFrames(S.t0, now);
@@ -8144,6 +8202,7 @@ function summaryKey(S, key) {
     if (i >= 0 && i < S.mons.length) {  // (its picture's made, and starts bouncing, 12 frames on)
       S.sw = {from: S.index, t0: now};
       Object.assign(S, {index: i, cursor: 0, swap: null, bounce: now + 12 * FRAME_MS});
+      sumCry(S.mons[i], 12 * FRAME_MS);
     }
   } else if (key === "A") {
     if (S.page === SUM.INFO) Object.assign(S, {phase: "close", t0: now});
@@ -8450,6 +8509,7 @@ function partyOpen() {
 }
 function partyClose() {
   const P = WORLD.party;
+  if (P && P.trade) return;  // (B does nothing in the trade scene)
   if (P && P.card && !P.closing && cardB(P, performance.now())) return;  // (the back: turned back over first)
   if (P && P.townMap) { tmapKey(P, "B"); return; }
   if (P && P.option) { optionClose(P); return; }
@@ -8489,7 +8549,7 @@ function partyTick(g, now) {
     if (f < 9) return false;  // (the world draws itself, faded: partyFade)
     Object.assign(P, {phase: "in", t0: now});  // (from this frame the party menu's drawn: still black)
     WORLD.start = null;
-    if (P.mart || P.sell) WORLD.dialog = null;  // (a Poké Mart's: the clerk's box goes with the field)
+    if (P.mart || P.sell || P.choose) WORLD.dialog = null;  // (a Poké Mart's, a trader's: their box goes with the field)
   }
   if (P.phase === "back") {
     if (f >= 9) {
@@ -8501,6 +8561,7 @@ function partyTick(g, now) {
     return false;
   }
   if (P.townMap) { tmapTick(g, P, now); return true; }  // (its own fades and timings)
+  if (P.trade) return tradeTick(g, P, now);  // (the trade scene's too)
   if (P.option) return optionTick(g, P, now);  // (its too)
   if (P.phase === "in" && partyFrames(P, now) >= 9) Object.assign(P, {phase: "open", t0: now, opened: now});
   if (P.phase === "close" && partyFrames(P, now) >= 9) {
@@ -8639,6 +8700,7 @@ function partyRepeat(P, now) {
 }
 function partyA() {
   const P = WORLD.party;
+  if (P && P.trade) { P.trade.E.keysNew |= 1; return; }  // (A: the trade scene's last message)
   if (P && P.townMap) { tmapKey(P, "A"); return; }
   if (!P || P.phase !== "open") return;
   if (P.summary) { summaryKey(P.summary, "A"); return; }
@@ -8653,6 +8715,7 @@ function partyA() {
   if (P.notice) { P.notice = null; return; }  // (a field move that can't be used: back to choosing)
   if (P.sliding) return;
   if (P.actions || P.switchFrom != null || P.softFrom != null || P.cursor !== PARTY_CANCEL) sfx("select");  // (CANCEL: partyClose's)
+  if (P.choose && P.cursor !== PARTY_CANCEL) { P.chosen = P.cursor; Object.assign(P, {phase: "close", t0: performance.now()}); return; }
   if (P.actions) { P.actions[P.actionCursor].pick(); return; }
   if (P.switchFrom != null) { fieldSwitchTo(P); return; }
   if (P.softFrom != null) { softBoiledTo(P); return; }
@@ -8953,6 +9016,7 @@ function showMon(mon, map) {  // resolves once it's done
   const steps = SHOW_MON_STEPS[outdoors] || (SHOW_MON_STEPS[outdoors] = showMonSteps(outdoors));
   return new Promise(ok => {
     const S = WORLD.showMon = {start: performance.now(), steps, outdoors, pic: null, done: ok};
+    cry(mon.id, "normal", 0, steps.findIndex(st => st.monX === 120) * FRAME_MS);  // (once it's in: SpriteCB_FieldMoveMonSlideOnscreen)
     sumLoad(sumPicUrl({pic: mon.pic, shiny: mon.is_shiny, personality: mon.personality})).then(img => { S.pic = img; });
   });
 }
@@ -10848,6 +10912,1060 @@ function worldPush(m) {
 }
 // touch controls: the D-pad is one surface (slide your thumb between directions, as on a real pad); A talks or
 // goes on, B held runs (and also goes on with text)
+// ---- trading: the trade scene (trade_scene.c: DoTradeAnim_Wireless, an in-game trade's) ----------------------------
+// Played as the game runs it, a frame at a time, on a small model of the GBA it runs on: VRAM, the palette buffers
+// (unfaded, faded) and palette RAM, OAM and its buffer, the registers, sprites (sprite.c: their animations, affine
+// animations, OAM matrices, tiles and palettes as they're allocated, the order BuildOamBuffer sorts them in), tasks
+// and the palette fade (palette.c), all filled from the ROM (/world/trade.json: World.trade_scene) and the two Pokémon
+// (the server's trade: World.trade_mon). Each frame is the game's: in VBlank, VBlankCB_TradeAnim (the scrolls and BG2's
+// affine registers, OAM and the palettes put in place from what last frame built), then CB2_InGameTrade (the scene's
+// state, tasks, sprites, OAM built, the fade), whose register and VRAM writes land while it's still VBlank, so they
+// show this frame; then it's drawn as the GBA draws it (tsRender). Its sounds are sfx's and its cries cry's (E.play,
+// E.cry: how long one goes on, in frames); no music.
+let TRADE_GFX = null;  // world.trade_scene (fetched when a trade comes)
+const TS_B64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+const TS_U16 = bytes => { const out = new Uint16Array(bytes.length >> 1); for (let i = 0; i < out.length; i++) out[i] = bytes[2 * i] | bytes[2 * i + 1] << 8; return out; };
+const TS_REGS = {DISPCNT: 0x00, BG0CNT: 0x08, BG1CNT: 0x0A, BG2CNT: 0x0C, BG3CNT: 0x0E, BG0HOFS: 0x10, BG0VOFS: 0x12, BG1HOFS: 0x14,
+                 BG1VOFS: 0x16, BG2HOFS: 0x18, BG2VOFS: 0x1A, BG3HOFS: 0x1C, BG3VOFS: 0x1E, BG2PA: 0x20, BG2PB: 0x22, BG2PC: 0x24,
+                 BG2PD: 0x26, BG2X_L: 0x28, BG2X_H: 0x2A, BG2Y_L: 0x2C, BG2Y_H: 0x2E, WIN0H: 0x40, WIN1H: 0x42, WIN0V: 0x44,
+                 WIN1V: 0x46, WININ: 0x48, WINOUT: 0x4A, BLDCNT: 0x50, BLDALPHA: 0x52, BLDY: 0x54};
+const DISPCNT_MODE_1 = 1, DISPCNT_OBJ_1D_MAP = 0x40, DISPCNT_BG0_ON = 0x100, DISPCNT_BG1_ON = 0x200, DISPCNT_BG2_ON = 0x400,
+      DISPCNT_OBJ_ON = 0x1000, DISPCNT_WIN0_ON = 0x2000;
+const TS_TAG_NONE = 0xFFFF, TS_RGB_BLACK = 0, TS_RGB_WHITE = 0x7FFF, TS_SPECIES_SHINY_TAG = 500;
+const TS_OAM_DIMS = [[[8, 8], [16, 16], [32, 32], [64, 64]], [[16, 8], [32, 8], [32, 16], [64, 32]], [[8, 16], [8, 32], [16, 32], [32, 64]]];
+const TS_DUMMY_OAM = {y: 160, affineMode: 0, objMode: 0, mosaic: 0, bpp: 0, shape: 0, x: 304, matrixNum: 0, size: 0, tileNum: 0, priority: 3,
+                      paletteNum: 0, affineParam: 0};  // (DUMMY_OAM_DATA)
+const tsOam = ([a0, a1, a2]) => ({y: a0 & 0xFF, affineMode: a0 >> 8 & 3, objMode: a0 >> 10 & 3, mosaic: a0 >> 12 & 1, bpp: a0 >> 13 & 1,
+                                  shape: a0 >> 14, x: a1 & 0x1FF, matrixNum: a1 >> 9 & 0x1F, size: a1 >> 14, tileNum: a2 & 0x3FF,
+                                  priority: a2 >> 10 & 3, paletteNum: a2 >> 12, affineParam: 0});
+const tsS16 = v => (v << 16) >> 16;
+
+// ---- the GBA's pieces the scene uses ------------------------------------------------------------------------------
+function tsGba() {
+  const E = {vram: new Uint8Array(0x18000), pltt: new Uint16Array(512), unfaded: new Uint16Array(512), faded: new Uint16Array(512),
+             oam: new Uint16Array(512), oamBuf: [], reg: new Uint16Array(0x30), frame: 0, keysNew: 0, sounds: [],
+             fade: {sel: 0, delay: 0, delayCounter: 0, y: 0, targetY: 0, color: 0, active: false, yDec: false, transferDisabled: false,
+                    finishingCounter: 0, finishing: false, toggle: 0, deltaY: 2},
+             plttPending: 0, sprites: [], order: [], tileBits: new Uint8Array(1024), tileTags: [], palTags: new Array(16).fill(TS_TAG_NONE),
+             matrices: [], matrixBits: 0, affStates: [], copies: [], copyNow: false, tasks: [], oamLimit: 64};
+  for (let i = 0; i < 128; i++) E.oamBuf.push(Object.assign({}, TS_DUMMY_OAM));
+  for (let i = 0; i < 64; i++) { E.sprites.push(tsDummySprite()); E.order.push(i); E.tileTags.push({tag: TS_TAG_NONE, start: 0, count: 0}); }
+  for (let i = 0; i < 32; i++) { E.matrices.push({a: 0x100, b: 0, c: 0, d: 0x100}); E.affStates.push(tsAffState()); }
+  return E;
+}
+function tsDummySprite() {  // (sDummySprite)
+  return {inUse: false, oam: Object.assign({}, TS_DUMMY_OAM), anims: [[0xFFFF]], affineAnims: [[[0x7FFF, 0, 0, 0]]], template: null,
+          callback: tsDummy, x: 304, y: 160, x2: 0, y2: 0, cx: 0, cy: 0, subpriority: 0xFF, invisible: false, data: new Int16Array(8),
+          animNum: 0, animCmdIndex: 0, animDelayCounter: 0, animLoopCounter: 0, animBeginning: false, animEnded: false, animPaused: false,
+          affineAnimBeginning: false, affineAnimEnded: false, affineAnimPaused: false, usingSheet: false, sheetTileStart: 0, images: null,
+          hFlip: 0, vFlip: 0};
+}
+const tsAffState = () => ({animNum: 0, animCmdIndex: 0, delayCounter: 0, loopCounter: 0, xScale: 0x100, yScale: 0x100, rotation: 0});
+function tsDummy() {}
+const tsSetReg = (E, name, v) => { E.reg[TS_REGS[name] >> 1] = v & 0xFFFF; };  // (SetGpuReg: in VBlank, at once)
+const tsGetReg = (E, name) => E.reg[TS_REGS[name] >> 1];
+const tsVram = (E, at, bytes, n = bytes.length) => E.vram.set(bytes.subarray(0, n), at);  // (DmaCopy16, LZ77UnCompVram)
+function tsSe(E, name) { E.sounds.push(name); if (E.play) E.play(name); }
+const TS_SPECIES_EGG = 412;
+function tsCry(E, who) {  // PlayCry_Normal (not an Egg's): how many frames IsCryFinished takes to say it's over
+  const species = E.mons[who].species;
+  return species === TS_SPECIES_EGG || !E.cry ? 0 : E.cry(species);
+}
+
+// palettes (palette.c, blend_palette.c)
+function tsLoadPalette(E, src, offset) { for (let i = 0; i < src.length; i++) E.unfaded[offset + i] = E.faded[offset + i] = src[i]; }
+function tsBlendPalette(E, offset, n, coeff, color) {
+  const br = color & 31, bg = color >> 5 & 31, bb = color >> 10 & 31;
+  for (let i = offset; i < offset + n; i++) {
+    const c = E.unfaded[i], r = c & 31, g = c >> 5 & 31, b = c >> 10 & 31;
+    E.faded[i] = ((r + (((br - r) * coeff) >> 4)) | ((g + (((bg - g) * coeff) >> 4)) << 5) | ((b + (((bb - b) * coeff) >> 4)) << 10)) & 0x7FFF;
+  }
+}
+function tsBlendPalettes(E, sel, coeff, color) { for (let off = 0; sel; off += 16, sel >>>= 1) if (sel & 1) tsBlendPalette(E, off, 16, coeff, color); }
+function tsBeginFade(E, sel, delay, startY, targetY, color) {  // BeginNormalPaletteFade
+  const F = E.fade;
+  if (F.active) return false;
+  F.deltaY = 2;
+  if (delay < 0) { F.deltaY += -delay; delay = 0; }
+  Object.assign(F, {sel: sel >>> 0, delayCounter: delay, delay, y: startY, targetY, color: color & 0x7FFF, active: true, yDec: startY >= targetY});
+  tsUpdateFade(E);
+  E.pltt.set(E.faded);  // (CpuCopy32 to PLTT: at once)
+  E.plttPending = 0;
+  return true;
+}
+function tsUpdateFade(E) {  // UpdatePaletteFade (UpdateNormalPaletteFade)
+  const F = E.fade;
+  if (E.plttPending) return;
+  if (F.active) {
+    if (F.finishing) {  // (IsSoftwarePaletteFadeFinishing)
+      if (F.finishingCounter === 4) { F.active = false; F.finishing = false; F.finishingCounter = 0; } else F.finishingCounter++;
+    } else {
+      let go = true;
+      if (!F.toggle) {
+        if (F.delayCounter < F.delay) { F.delayCounter++; go = false; } else F.delayCounter = 0;
+      }
+      if (go) {
+        let sel = F.toggle ? F.sel >>> 16 : F.sel & 0xFFFF, off = F.toggle ? 256 : 0;
+        for (; sel; sel >>>= 1, off += 16) if (sel & 1) tsBlendPalette(E, off, 16, F.y, F.color);
+        F.toggle ^= 1;
+        if (!F.toggle) {
+          if (F.y === F.targetY) { F.sel = 0; F.finishing = true; }
+          else F.y = F.yDec ? Math.max(F.targetY, F.y - F.deltaY) : Math.min(F.targetY, F.y + F.deltaY);
+        }
+      }
+    }
+  }
+  E.plttPending = F.sel;  // (sPlttBufferTransferPending = gPaletteFade.multipurpose1)
+}
+function tsTransferPltt(E) { if (!E.fade.transferDisabled) { E.pltt.set(E.faded); E.plttPending = 0; } }  // TransferPlttBuffer
+
+// tasks (task.c: run in priority order, a new one after those of its priority)
+function tsCreateTask(E, func, priority) {
+  const t = {func, priority, data: new Int16Array(16), alive: true};
+  let i = E.tasks.findIndex(o => o.priority > priority);
+  if (i < 0) i = E.tasks.length;
+  E.tasks.splice(i, 0, t);
+  return t;
+}
+const tsDestroyTask = (E, t) => { t.alive = false; E.tasks = E.tasks.filter(o => o !== t); };
+const tsTaskActive = (E, func) => E.tasks.some(t => t.func === func);
+function tsRunTasks(E) { for (const t of E.tasks.slice()) if (t.alive) t.func(E, t); }
+
+// sprite tiles, palettes, matrices (sprite.c)
+function tsAllocTiles(E, n) {  // AllocSpriteTiles (0: all of them freed)
+  if (!n) { E.tileBits.fill(0); return 0; }
+  let i = 0;
+  for (;;) {
+    while (E.tileBits[i]) if (++i === 1024) return -1;
+    const start = i;
+    let found = 1;
+    while (found !== n) { if (++i === 1024) return -1; if (!E.tileBits[i]) found++; else break; }
+    if (found === n) { E.tileBits.fill(1, start, start + n); return start; }
+  }
+}
+function tsLoadSheet(E, sheet) {  // LoadSpriteSheet ({data: bytes, size, tag})
+  const start = tsAllocTiles(E, sheet.size >> 5);
+  if (start < 0) return 0;
+  const r = E.tileTags.find(t => t.tag === TS_TAG_NONE);
+  Object.assign(r, {tag: sheet.tag, start, count: sheet.size >> 5});
+  E.vram.set(sheet.data.subarray(0, sheet.size), 0x10000 + 32 * start);
+  return start;
+}
+const tsTileStart = (E, tag) => { const r = E.tileTags.find(t => t.tag === tag); return r ? r.start : TS_TAG_NONE; };
+function tsFreeTilesByTag(E, tag) {
+  const r = E.tileTags.find(t => t.tag === tag);
+  if (r) { E.tileBits.fill(0, r.start, r.start + r.count); r.tag = TS_TAG_NONE; }
+}
+const tsPalIndex = (E, tag) => { const i = E.palTags.indexOf(tag); return i < 0 ? 0xFF : i; };
+function tsLoadSpritePalette(E, pal) {  // LoadSpritePalette ({data: u16s, tag})
+  let i = tsPalIndex(E, pal.tag);
+  if (i !== 0xFF) return i;
+  i = tsPalIndex(E, TS_TAG_NONE);
+  if (i === 0xFF) return 0xFF;
+  E.palTags[i] = pal.tag;
+  tsLoadPalette(E, pal.data, 256 + 16 * i);
+  return i;
+}
+function tsFreePaletteByTag(E, tag) { const i = tsPalIndex(E, tag); if (i !== 0xFF) E.palTags[i] = TS_TAG_NONE; }
+function tsAllocMatrix(E) { for (let i = 0; i < 32; i++) if (!(E.matrixBits & 1 << i)) { E.matrixBits |= 1 << i; return i; } return 0xFF; }
+function tsFreeMatrix(E, i) { E.matrixBits &= ~(1 << i); E.matrices[i] = {a: 0x100, b: 0, c: 0, d: 0x100}; }
+
+// sprites
+function tsCenterToCorner(S, shape, size, affineMode) {  // CalcCenterToCornerVec
+  const T = TRADE_GFX.tables.center_to_corner, k = 2 * (4 * shape + size);
+  S.cx = T[k] * (affineMode & 2 ? 2 : 1);
+  S.cy = T[k + 1] * (affineMode & 2 ? 2 : 1);
+}
+function tsCreateSprite(E, template, x, y, subpriority) {  // CreateSprite (template: World._sprite_template's, + callback, images)
+  const i = E.sprites.findIndex(S => !S.inUse);
+  if (i < 0) return 64;
+  const S = E.sprites[i] = tsDummySprite();
+  Object.assign(S, {inUse: true, animBeginning: true, affineAnimBeginning: true, usingSheet: true, subpriority, oam: tsOam(template.oam),
+                    anims: template.anims, affineAnims: template.affine, template, callback: template.callback || tsDummy, x, y});
+  tsCenterToCorner(S, S.oam.shape, S.oam.size, S.oam.affineMode);
+  if (template.tile_tag === TS_TAG_NONE) {  // (its own tiles, its frames copied in: images)
+    S.images = template.images;
+    const n = S.images[0].length >> 5, tile = tsAllocTiles(E, n);
+    if (tile < 0) { E.sprites[i] = tsDummySprite(); return 64; }
+    S.oam.tileNum = tile;
+    S.usingSheet = false;
+  } else {
+    S.sheetTileStart = tsTileStart(E, template.tile_tag);
+    tsSheetFrame(S);
+  }
+  if (S.oam.affineMode & 1) tsInitAffine(E, S);
+  if (template.pal_tag !== TS_TAG_NONE) S.oam.paletteNum = tsPalIndex(E, template.pal_tag) & 15;
+  return i;
+}
+function tsSheetFrame(S) {  // SetSpriteSheetFrameTileNum
+  if (!S.usingSheet) return;
+  const v = tsS16(S.anims[S.animNum][S.animCmdIndex] & 0xFFFF);
+  S.oam.tileNum = (S.sheetTileStart + Math.max(0, v)) & 0x3FF;
+}
+function tsInitAffine(E, S) {  // InitSpriteAffineAnim
+  const m = tsAllocMatrix(E);
+  if (m === 0xFF) return;
+  tsCenterToCorner(S, S.oam.shape, S.oam.size, S.oam.affineMode);
+  S.oam.matrixNum = m;
+  S.affineAnimBeginning = true;
+  E.affStates[m] = tsAffState();
+}
+function tsDestroySprite(E, S) {  // DestroySprite
+  if (!S.inUse) return;
+  if (!S.usingSheet) E.tileBits.fill(0, S.oam.tileNum, S.oam.tileNum + (S.images[0].length >> 5));
+  E.sprites[E.sprites.indexOf(S)] = tsDummySprite();
+}
+function tsFreeMatrixOf(E, S) { if (S.oam.affineMode & 1) { tsFreeMatrix(E, S.oam.matrixNum); S.oam.affineMode = 0; } }  // FreeSpriteOamMatrix
+function tsDestroyAndFree(E, S) {  // DestroySpriteAndFreeResources
+  if (S.template.tile_tag !== TS_TAG_NONE) tsFreeTilesByTag(E, S.template.tile_tag);
+  tsFreePaletteByTag(E, S.template.pal_tag);
+  tsFreeMatrixOf(E, S);
+  tsDestroySprite(E, S);
+}
+const tsStartAnim = (S, n) => { S.animNum = n; S.animBeginning = true; S.animEnded = false; };  // StartSpriteAnim
+const tsMatrixNum = S => S.oam.affineMode & 1 ? S.oam.matrixNum : 0;
+function tsStartAffine(E, S, n) {  // StartSpriteAffineAnim
+  E.affStates[tsMatrixNum(S)] = Object.assign(tsAffState(), {animNum: n});
+  S.affineAnimBeginning = true;
+  S.affineAnimEnded = false;
+}
+// image animations (AnimCmd: a frame's image value and duration, END, JUMP, LOOP)
+const tsCmdType = v => tsS16(v & 0xFFFF);
+function tsSetFrame(E, S, v) {
+  let d = v >> 16 & 0x3F;
+  if (d) d--;
+  S.animDelayCounter = d;
+  if (!(S.oam.affineMode & 1)) tsFlipBits(S, v >> 22 & 1, v >> 23 & 1);
+  if (S.usingSheet) S.oam.tileNum = (S.sheetTileStart + tsS16(v & 0xFFFF)) & 0x3FF;
+  else E.copies.push([S.images[tsS16(v & 0xFFFF)], 0x10000 + 32 * S.oam.tileNum]);  // (RequestSpriteFrameImageCopy)
+}
+function tsFlipBits(S, h, v) { S.oam.matrixNum = (S.oam.matrixNum & 7) | ((h ^ S.hFlip) & 1) << 3 | ((v ^ S.vFlip) & 1) << 4; }
+function tsAnimate(E, S) {  // AnimateSprite
+  const cmds = () => S.anims[S.animNum];
+  if (S.animBeginning) {  // BeginAnim
+    S.animCmdIndex = 0; S.animEnded = false; S.animLoopCounter = 0;
+    const v = cmds()[0];
+    if (tsCmdType(v) !== -1) { S.animBeginning = false; tsSetFrame(E, S, v); }
+  } else tsContinueAnim(E, S);
+  if (S.affineAnimBeginning) tsBeginAffine(E, S); else tsContinueAffine(E, S);
+}
+function tsContinueAnim(E, S) {
+  const cmds = S.anims[S.animNum];
+  if (S.animDelayCounter) {
+    if (!S.animPaused) S.animDelayCounter--;
+    const v = cmds[S.animCmdIndex];
+    if (!(S.oam.affineMode & 1)) tsFlipBits(S, v >> 22 & 1, v >> 23 & 1);
+  } else if (!S.animPaused) {
+    const v = cmds[++S.animCmdIndex], type = tsCmdType(v);
+    if (type === -1) { S.animCmdIndex--; S.animEnded = true; }  // AnimCmd_end
+    else if (type === -2) { S.animCmdIndex = v >> 16 & 0x3F; tsSetFrame(E, S, cmds[S.animCmdIndex]); }  // AnimCmd_jump
+    else if (type === -3) {  // AnimCmd_loop
+      if (S.animLoopCounter) S.animLoopCounter--; else S.animLoopCounter = v >> 16 & 0x3F;
+      if (S.animLoopCounter) {  // (JumpToTopOfAnimLoop)
+        S.animCmdIndex--;
+        while (tsCmdType(cmds[S.animCmdIndex - 1]) !== -3) { if (S.animCmdIndex === 0) break; S.animCmdIndex--; }
+        S.animCmdIndex--;
+      }
+      tsContinueAnim(E, S);
+    } else tsSetFrame(E, S, v);  // AnimCmd_frame
+  }
+}
+// affine animations (AffineAnimCmd: [x scale, y scale, rotation, duration], END 0x7FFF, JUMP 0x7FFE, LOOP 0x7FFD)
+function tsAffineCmd(E, m, S) { const A = E.affStates[m]; return S.affineAnims[A.animNum][A.animCmdIndex]; }
+function tsApplyRelative(E, m, [x, y, rot]) {  // ApplyAffineAnimFrameRelativeAndUpdateMatrix (no rotation here: ObjAffineSet is the scales)
+  const A = E.affStates[m];
+  A.xScale = tsS16(A.xScale + x); A.yScale = tsS16(A.yScale + y);
+  A.rotation = (A.rotation + ((rot << 24 >> 24) << 8)) & ~0xFF & 0xFFFF;
+  const conv = v => v ? tsS16(Math.trunc(0x10000 / v)) : 0;  // (ConvertScaleParam)
+  E.matrices[m] = {a: conv(A.xScale), b: 0, c: 0, d: conv(A.yScale)};
+}
+function tsApplyFrame(E, m, cmd) {  // ApplyAffineAnimFrame
+  if (cmd[3]) tsApplyRelative(E, m, cmd);
+  else { Object.assign(E.affStates[m], {xScale: cmd[0], yScale: cmd[1], rotation: (cmd[2] << 24 >> 24) << 8 & 0xFFFF}); tsApplyRelative(E, m, [0, 0, 0]); }
+}
+function tsBeginAffine(E, S) {
+  if (!(S.oam.affineMode & 1) || S.affineAnims[0][0][0] === 0x7FFF) return;
+  const m = tsMatrixNum(S), A = E.affStates[m];
+  A.animCmdIndex = 0; A.delayCounter = 0; A.loopCounter = 0;
+  const cmd = tsAffineCmd(E, m, S);
+  S.affineAnimBeginning = false; S.affineAnimEnded = false;
+  tsApplyFrame(E, m, cmd);
+  A.delayCounter = cmd[3] ? cmd[3] - 1 : 0;
+}
+function tsContinueAffine(E, S) {
+  if (!(S.oam.affineMode & 1)) return;
+  const m = tsMatrixNum(S), A = E.affStates[m];
+  if (A.delayCounter) {  // AffineAnimDelay
+    if (!S.affineAnimPaused) A.delayCounter--;
+    if (!S.affineAnimPaused) tsApplyRelative(E, m, tsAffineCmd(E, m, S));
+  } else if (!S.affineAnimPaused) {
+    A.animCmdIndex++;
+    const cmd = tsAffineCmd(E, m, S), type = cmd[0];
+    if (type === 0x7FFF) { S.affineAnimEnded = true; A.animCmdIndex--; tsApplyRelative(E, m, [0, 0, 0]); }  // AffineAnimCmd_end
+    else if (type === 0x7FFE) { A.animCmdIndex = cmd[1] & 0xFFFF; const c = tsAffineCmd(E, m, S); tsApplyFrame(E, m, c); A.delayCounter = c[3] ? c[3] - 1 : 0; }
+    else if (type === 0x7FFD) {  // AffineAnimCmd_loop
+      if (A.loopCounter) A.loopCounter--; else A.loopCounter = cmd[1] & 0xFFFF;
+      if (A.loopCounter) {
+        A.animCmdIndex--;
+        while (S.affineAnims[A.animNum][A.animCmdIndex - 1][0] !== 0x7FFD) { if (A.animCmdIndex === 0) break; A.animCmdIndex--; }
+        A.animCmdIndex--;
+      }
+      tsContinueAffine(E, S);
+    } else { tsApplyFrame(E, m, cmd); A.delayCounter = cmd[3] ? cmd[3] - 1 : 0; }  // AffineAnimCmd_frame
+  }
+}
+function tsAnimateSprites(E) {  // AnimateSprites
+  for (let i = 0; i < 64; i++) {
+    const S = E.sprites[i];
+    if (!S.inUse) continue;
+    S.callback(E, S);
+    if (E.sprites[i] === S && S.inUse) tsAnimate(E, S);
+  }
+}
+function tsBuildOam(E) {  // BuildOamBuffer
+  for (const S of E.sprites)
+    if (S.inUse && !S.invisible) { S.oam.x = (S.x + S.x2 + S.cx) & 0x1FF; S.oam.y = (S.y + S.y2 + S.cy) & 0xFF; }
+  const prio = E.sprites.map(S => S.subpriority | S.oam.priority << 8);
+  const sortY = S => {
+    let y = S.oam.y;
+    if (y >= 160) y -= 256;
+    if (S.oam.affineMode === 3 && S.oam.size === 3 && (S.oam.shape === 0 || S.oam.shape === 2) && y > 128) y -= 256;
+    return y;
+  };
+  const O = E.order;
+  for (let i = 1; i < 64; i++) {  // SortSprites (an insertion sort, kept from frame to frame)
+    let j = i;
+    const out = (a, b) => prio[O[a]] > prio[O[b]] || (prio[O[a]] === prio[O[b]] && sortY(E.sprites[O[a]]) < sortY(E.sprites[O[b]]));
+    while (j > 0 && out(j - 1, j)) { [O[j - 1], O[j]] = [O[j], O[j - 1]]; j--; }
+  }
+  let k = 0;
+  for (let i = 0; i < 64 && k < E.oamLimit; i++) {
+    const S = E.sprites[O[i]];
+    if (S.inUse && !S.invisible) E.oamBuf[k++] = Object.assign({}, S.oam);
+  }
+  while (k < E.oamLimit) E.oamBuf[k++] = Object.assign({}, TS_DUMMY_OAM);
+  for (let i = 0; i < 32; i++) {  // CopyMatricesToOamBuffer
+    const M = E.matrices[i];
+    E.oamBuf[4 * i].affineParam = M.a; E.oamBuf[4 * i + 1].affineParam = M.b;
+    E.oamBuf[4 * i + 2].affineParam = M.c; E.oamBuf[4 * i + 3].affineParam = M.d;
+  }
+  E.copyNow = true;
+}
+function tsLoadOam(E, buf) {  // LoadOam
+  buf.forEach((o, i) => {
+    E.oam[4 * i] = (o.y & 0xFF) | o.affineMode << 8 | o.objMode << 10 | o.mosaic << 12 | o.bpp << 13 | o.shape << 14;
+    E.oam[4 * i + 1] = (o.x & 0x1FF) | (o.matrixNum & 0x1F) << 9 | o.size << 14;
+    E.oam[4 * i + 2] = (o.tileNum & 0x3FF) | o.priority << 10 | o.paletteNum << 12;
+    E.oam[4 * i + 3] = o.affineParam & 0xFFFF;
+  });
+}
+function tsCopyRequests(E) {  // ProcessSpriteCopyRequests
+  if (!E.copyNow) return;
+  for (const [src, at] of E.copies) E.vram.set(src, at);
+  E.copies = []; E.copyNow = false;
+}
+
+// ---- the scene: its graphics, set up as CB2_InitInGameTrade does, then DoTradeAnim_Wireless a frame at a time -----
+// T: the trade (the server's: "sent" and "received", each World.trade_mon's with its "personality"; "texts"). drawText
+// (lines) gives the message window's pixels (208x32 palette indexes, 15 the background), as the game's normal font
+// prints them (AddTextPrinterParameterized4: 0, 2; colors 15, 1, 6).
+const TS = {START: 0, MON_SLIDE_IN: 1, SEND_MSG: 10, BYE_BYE: 11, POKEBALL_DEPART: 12, POKEBALL_DEPART_WAIT: 13,
+            FADE_OUT_TO_GBA_SEND: 14, WAIT_FADE_OUT_TO_GBA_SEND: 20, FADE_IN_TO_GBA_SEND: 21, WAIT_FADE_IN_TO_GBA_SEND: 22,
+            GBA_ZOOM_OUT: 23, PAN_AWAY_GBA: 26, CREATE_LINK_MON_LEAVING: 27, LINK_MON_TRAVEL_OUT: 28, FADE_OUT_TO_CROSSING: 29,
+            WAIT_FADE_OUT_TO_CROSSING: 30, FADE_IN_TO_CROSSING: 31, WAIT_FADE_IN_TO_CROSSING: 32, CROSSING_LINK_MONS_ENTER: 33,
+            CROSSING_BLEND_WHITE_1: 34, CROSSING_BLEND_WHITE_2: 35, CROSSING_BLEND_WHITE_3: 36, CROSSING_CREATE_MON_PICS: 37,
+            CROSSING_MON_PICS_MOVE: 38, CROSSING_LINK_MONS_EXIT: 39, CREATE_LINK_MON_ARRIVING: 40, FADE_OUT_TO_GBA_RECV: 41,
+            WAIT_FADE_OUT_TO_GBA_RECV: 42, LINK_MON_TRAVEL_IN: 43, LINK_MON_ARRIVED_DELAY: 46, MOVE_GBA_TO_CENTER: 47,
+            GBA_FLASH_RECV: 48, GBA_STOP_FLASH_RECV: 50, GBA_ZOOM_IN: 51, FADE_OUT_TO_NEW_MON: 52, WAIT_FADE_OUT_TO_NEW_MON: 60,
+            FADE_IN_TO_NEW_MON: 61, WAIT_FADE_IN_TO_NEW_MON: 62, POKEBALL_ARRIVE: 63, FADE_POKEBALL_TO_NORMAL: 64,
+            POKEBALL_ARRIVE_WAIT: 65, SHOW_NEW_MON: 66, NEW_MON_MSG: 67, TAKE_CARE_OF_MON: 68, AFTER_NEW_MON_DELAY: 69,
+            CHECK_RIBBONS: 70, END_LINK_TRADE: 71, TRY_EVOLUTION: 72, FADE_OUT_END: 73, WAIT_FADE_OUT_END: 74,
+            GBA_FLASH_SEND_WIRELESS: 124, GBA_STOP_FLASH_SEND_WIRELESS: 125, WAIT_WIRELESS_SIGNAL_SEND: 126,
+            PAN_TO_GBA_WIRELESS: 144, DESTROY_LINK_MON_WIRELESS: 145, WAIT_WIRELESS_SIGNAL_RECV: 146,
+            DELAY_FOR_MON_ANIM: 167, LINK_MON_TRAVEL_OFFSCREEN: 200, WAIT_FOR_MON_CRY: 267, DONE: 999};
+const TS_PLAYER = 0, TS_PARTNER = 1, TS_BALL_AFFINE_RETURN = 2, TS_BALL_AFFINE_EMERGE = 1;
+function tsTradeNew(T, drawText) {
+  const D = TRADE_GFX, E = tsGba();
+  E.drawText = drawText;
+  E.T = T;
+  E.bin = Object.fromEntries(Object.entries(D.bin).map(([k, v]) => [k, TS_B64(v)]));
+  E.sheet = k => ({data: TS_B64(D.sheets[k].data), size: D.sheets[k].size, tag: D.sheets[k].tag});
+  E.pal = k => ({data: TS_U16(TS_B64(D.pals[k].data)), tag: D.pals[k].tag});
+  E.tpl = (k, callback, extra) => Object.assign({}, D.templates[k], {callback}, extra || {});
+  E.S = {state: 0, timer: 0, bg1vofs: 0, bg1hofs: 0, bg2vofs: 0, bg2hofs: 0, sXY: 256, zoom: 0, texX: 64, texY: 64, srcX: 120, srcY: 80,
+         win0left: 0, win0top: 0, win0right: 0, win0bottom: 0, mon: [], species: [], init: 0, vblank: false, done: false};
+  E.mons = [T.sent, T.received];
+  return E;
+}
+// one frame: VBlank (what last frame left: VBlankCB_TradeAnim), then the frame's callback (CB2_InitInGameTrade, then
+// CB2_InGameTrade); a held A pressed this frame: E.keysNew
+// A frame that prints a message (at once: the text printer's speed 0) takes the game longer than a frame: the next VBlank
+// comes while it's still printing (E.lag), before it's built OAM (the last frame's shows: E.before), and it goes on a
+// frame behind.
+function tsFrame(E) { tsVBlank(E); tsLogic(E); }
+function tsVBlank(E) {  // VBlankCB_TradeAnim
+  if (!E.S.vblank) return;
+  tsSetTradeRegs(E, E.S);
+  tsLoadOam(E, E.lag ? E.before : E.oamBuf);
+  tsCopyRequests(E);
+  tsTransferPltt(E);
+}
+function tsLogic(E) {
+  const S = E.S;
+  if (E.lag) { E.lag = false; return; }  // (still at the last frame's)
+  E.before = E.oamBuf.map(o => Object.assign({}, o));
+  if (S.init < 13) tsInit(E); else if (!S.done) tsAnim(E);
+  tsRunTasks(E);
+  tsAnimateSprites(E);
+  tsBuildOam(E);
+  tsUpdateFade(E);
+  E.keysNew = 0;
+  E.frame++;
+}
+function tsSetTradeRegs(E, S) {  // SetTradeGpuRegs
+  tsSetReg(E, "BG1VOFS", S.bg1vofs); tsSetReg(E, "BG1HOFS", S.bg1hofs);
+  if ((tsGetReg(E, "DISPCNT") & 7) === 0) { tsSetReg(E, "BG2VOFS", S.bg2vofs); tsSetReg(E, "BG2HOFS", S.bg2hofs); }
+  else {  // SetTradeBGAffine (DoBgAffineSet, no rotation: the scales; SetGpuReg's 16 bits: BG2X's and BG2Y's low halves)
+    tsSetReg(E, "BG2PA", S.sXY); tsSetReg(E, "BG2PB", 0); tsSetReg(E, "BG2PC", 0); tsSetReg(E, "BG2PD", S.sXY);
+    tsSetReg(E, "BG2X_L", S.texX * 256 - tsS16(S.sXY) * S.srcX); tsSetReg(E, "BG2Y_L", S.texY * 256 - tsS16(S.sXY) * S.srcY);
+  }
+}
+function tsWindowText(E, text) {  // DrawTextOnTradeWindow: the window's tiles (BG0's 0x40 on, 26x4), then put in VRAM
+  if (text) E.lag = true;
+  const px = E.drawText ? E.drawText(text) : null, base = 0xC000 + 32 * 0x40;
+  for (let ty = 0; ty < 4; ty++)
+    for (let tx = 0; tx < 26; tx++)
+      for (let r = 0; r < 8; r++)
+        for (let c = 0; c < 8; c += 2) {
+          const at = (8 * ty + r) * 208 + 8 * tx + c, lo = px ? px[at] : 15, hi = px ? px[at + 1] : 15;
+          E.vram[base + 32 * (26 * ty + tx) + 4 * r + (c >> 1)] = lo | hi << 4;
+        }
+}
+function tsMonPic(E, who, step) {  // LoadTradeMonPic
+  const m = E.mons[who], S = E.S;
+  const tag = m.species + (m.is_shiny ? TS_SPECIES_SHINY_TAG : 0);
+  if (step === 0) {
+    tsLoadSpritePalette(E, {data: Uint16Array.from(m.pal), tag});
+    S.species[who] = m.species;
+    m.images = [TS_B64(m.gfx)];
+  } else {
+    const id = tsCreateSprite(E, E.tpl(who === TS_PLAYER ? "mon_left" : "mon_right", tsDummy, {images: m.images, pal_tag: tag}), 120, 60, 6);
+    S.mon[who] = id;
+    E.sprites[id].invisible = true;
+  }
+}
+function tsInit(E) {  // CB2_InitInGameTrade
+  const S = E.S;
+  switch (S.init) {
+    case 0:  // (TradeAnimInit_LoadGfx: the battle's text box on BG0, its palette 0, the BGs' templates)
+      tsSetReg(E, "DISPCNT", 0);  // (the BGs' CNTs are set as they're shown: BG0's at ShowBg)
+      tsVram(E, 0xC000, E.bin.textbox_gfx);
+      E.bg0map = new Uint16Array(TS_U16(E.bin.textbox_map).subarray(0, 0x400));
+      tsLoadPalette(E, TS_U16(E.bin.textbox_pal), 0);
+      S.vblank = true;
+      S.init = 5;
+      return;
+    case 5: tsMonPic(E, TS_PLAYER, 0); break;
+    case 6: tsMonPic(E, TS_PLAYER, 1); break;
+    case 7: tsMonPic(E, TS_PARTNER, 0); tsShowBg0(E); break;
+    case 8:  // (the message window: filled, put on BG0's tilemap, BG0 in VRAM)
+      tsMonPic(E, TS_PARTNER, 1);
+      tsWindowText(E, "");
+      for (let y = 0; y < 4; y++) for (let x = 0; x < 26; x++) E.bg0map[32 * (15 + y) + 2 + x] = 0x40 + 26 * y + x;
+      for (let i = 0; i < 0x400; i++) { E.vram[0xF800 + 2 * i] = E.bg0map[i] & 0xFF; E.vram[0xF800 + 2 * i + 1] = E.bg0map[i] >> 8; }
+      break;
+    case 9:  // LoadTradeGbaSpriteGfx; the ball's sheet and palette
+      for (const k of ["link_mon_glow", "link_mon_shadow", "cable_end", "gba_screen"]) tsLoadSheet(E, E.sheet(k));
+      tsLoadSpritePalette(E, E.pal("link_mon")); tsLoadSpritePalette(E, E.pal("gba"));
+      tsLoadSheet(E, E.sheet("pokeball")); tsLoadSpritePalette(E, E.pal("pokeball"));
+      break;
+    case 10: tsShowBg0(E); break;
+    case 11: tsBgRegs(E, 5); tsBgRegs(E, 0); break;
+    case 12: break;  // (SetMainCallback2(CB2_InGameTrade): from the next frame)
+  }
+  S.init++;
+}
+function tsShowBg0(E) {  // ShowBg(0): its CNT (sBgTemplates': priority 0, char 3, map 31), then it's on
+  tsSetReg(E, "BG0CNT", 0 | 3 << 2 | 31 << 8);
+  tsSetReg(E, "DISPCNT", tsGetReg(E, "DISPCNT") | DISPCNT_BG0_ON);
+}
+function tsBgRegs(E, n) {  // SetTradeSequenceBgGpuRegs (the wireless trade's)
+  const S = E.S, B = E.bin;
+  if (n === 0 || n === 7) {
+    if (n === 0) { S.bg2vofs = 0; S.bg2hofs = 0xB4; tsSetReg(E, "DISPCNT", DISPCNT_OBJ_1D_MAP | DISPCNT_BG0_ON | DISPCNT_BG2_ON | DISPCNT_OBJ_ON); }
+    else { S.bg2vofs = 0; S.bg2hofs = 0; tsSetReg(E, "BLDCNT", 0); }
+    tsSetReg(E, "BG2CNT", 2 | 1 << 2 | 18 << 8 | 1 << 14);
+    tsLoadPalette(E, TS_U16(B.gba2_pal), 16);
+    tsVram(E, 0x4000, B.gba_gfx); tsVram(E, 0x9000, B.shadow_map);
+  } else if (n === 1) {
+    S.bg1hofs = 0; S.bg1vofs = 0x15C;
+    tsSetReg(E, "BG1VOFS", 0x15C);
+    tsSetReg(E, "BG1CNT", 2 | 0 << 2 | 5 << 8 | 2 << 14); tsSetReg(E, "BG2CNT", 2 | 1 << 2 | 18 << 8 | 2 << 14);
+    tsVram(E, 0x2800, B.gba_map); tsVram(E, 0x0000, B.gba_gfx);
+    tsSetReg(E, "DISPCNT", DISPCNT_OBJ_1D_MAP | DISPCNT_BG1_ON | DISPCNT_OBJ_ON);
+  } else if (n === 2) {
+    S.bg1vofs = 0; S.bg1hofs = 0;
+    tsSetReg(E, "DISPCNT", DISPCNT_MODE_1 | DISPCNT_OBJ_1D_MAP | DISPCNT_BG1_ON | DISPCNT_OBJ_ON);
+    tsVram(E, 0x2800, B.closeup_map);
+    tsBlendPalettes(E, 0x8, 16, TS_RGB_BLACK);
+  } else if (n === 3) {
+    tsLoadPalette(E, TS_U16(B.signal_off), 48);
+    tsVram(E, 0x4000, B.signal_gfx); tsVram(E, 0x9000, B.signal_map);
+    S.bg2vofs = 0x50;
+    tsSetReg(E, "DISPCNT", DISPCNT_OBJ_1D_MAP | DISPCNT_BG1_ON | DISPCNT_BG2_ON | DISPCNT_OBJ_ON);
+  } else if (n === 4 || n === 6) {
+    tsSetReg(E, "DISPCNT", DISPCNT_MODE_1 | DISPCNT_OBJ_1D_MAP | DISPCNT_BG2_ON | DISPCNT_OBJ_ON);
+    tsSetReg(E, "BG2CNT", 3 | 1 << 2 | 0x80 | 18 << 8);  // (8bpp, 128x128 affine; 6's "256x256" is the same size bits)
+    Object.assign(S, n === 4 ? {texX: 0x40, texY: 0x5C, sXY: 0x20, zoom: 0x400} : {texX: 0x40, texY: 0x5C, sXY: 0x100, zoom: 0x80, srcX: 0x78, srcY: 0x50});
+    tsVram(E, 0x4000, B.affine_gfx); tsVram(E, 0x9000, B.affine_map);
+  } else if (n === 5) { S.bg1vofs = 0; S.bg1hofs = 0; }
+}
+const tsSine = (i, amp) => (amp * TRADE_GFX.tables.sine[i]) >> 8;  // Sin()
+const tsCos = (i, amp) => (amp * TRADE_GFX.tables.sine[i + 64]) >> 8;  // Cos()
+const tsVel = i => TRADE_GFX.tables.velocity[i];  // sTradeBallVerticalVelocityTable
+// the scene's sprites' callbacks
+function tsCbBouncingDepart(E, S) {  // SpriteCB_BouncingPokeballDepart
+  S.y2 += tsVel(S.data[0]);
+  if (S.data[0] === 22) tsSe(E, "ball_bounce_1");
+  if (++S.data[0] === 44) {
+    tsSe(E, "mega_kick");
+    S.callback = tsCbBouncingDepartEnd;
+    S.data[0] = 0;
+    tsBeginFade(E, 1 << (S.oam.paletteNum + 16), -1, 0, 16, TS_RGB_WHITE);
+  }
+}
+function tsCbBouncingDepartEnd(E, S) {  // SpriteCB_BouncingPokeballDepartEnd
+  if (S.data[1] === 20) tsStartAffine(E, S, 1);
+  if (++S.data[1] > 20) {
+    S.y2 -= tsVel(S.data[0]);
+    if (++S.data[0] === 23) { tsDestroySprite(E, S); E.S.state = TS.FADE_OUT_TO_GBA_SEND; }
+  }
+}
+function tsCbBouncingArrive(E, S) {  // SpriteCB_BouncingPokeballArrive
+  if (S.data[2] === 0) {
+    S.y += 4;
+    if (S.y > S.data[3]) { S.data[2]++; S.data[0] = 22; tsSe(E, "ball_bounce_1"); }
+  } else {
+    if (S.data[0] === 66) tsSe(E, "ball_bounce_2");
+    if (S.data[0] === 92) tsSe(E, "ball_bounce_3");
+    if (S.data[0] === 107) tsSe(E, "ball_bounce_4");
+    S.y2 += tsVel(S.data[0]);
+    if (++S.data[0] === 108) S.callback = tsDummy;
+  }
+}
+function tsCbGlowWireless(E, S) { if (!S.invisible && ++S.data[0] === 10) { tsSe(E, "swagger2"); S.data[0] = 0; } }  // SpriteCB_LinkMonGlowWireless
+function tsCbShadow(E, S) {  // SpriteCB_LinkMonShadow: its core's color going round
+  if (S.data[1] !== 0) return;
+  if (++S.data[0] === 12) S.data[0] = 0;
+  tsLoadPalette(E, [TRADE_GFX.tables.shadow_pal[S.data[0]]], 256 + 16 * S.oam.paletteNum + 4);
+}
+function tsCbGbaScreen(E, S) { if (++S.data[0] === 15) { tsSe(E, "minimize"); S.data[0] = 0; } }  // SpriteCB_GbaScreen
+// the Poké Ball the Pokémon goes into and comes out of (pokeball.c), its particles and fades (battle_anim_special.c)
+function tsBallSprite(E, mon, palNum, x, y, priority, subpriority, delay, fade, callback) {
+  tsLoadSheet(E, E.sheet("ball"));  // (LoadCompressedSpriteSheetUsingHeap: again, if it's there already)
+  tsLoadSpritePalette(E, E.pal("ball"));
+  const id = tsCreateSprite(E, E.tpl("ball", callback), x, y, subpriority), S = E.sprites[id];
+  S.data[0] = mon; S.data[1] = delay; S.data[2] = palNum; S.data[3] = fade & 0xFFFF; S.data[4] = fade >>> 16;
+  S.oam.priority = priority;
+  return id;
+}
+const tsFadePals = S => (S.data[3] & 0xFFFF | (S.data[4] & 0xFFFF) << 16) >>> 0;
+function tsBallOpens(E, S) {  // (the ball's opening: its particles, the Pokémon's colors and the screen's fade)
+  tsBallParticles(E, S.x, S.y - 5, S.oam.priority, S.subpriority ? S.subpriority - 1 : 0);
+  tsFadeMonTask(E, S.data[2], tsFadePals(S));
+}
+function tsBallParticles(E, x, y, priority, subpriority) {  // AnimateBallOpenParticles (BALL_POKE)
+  if (tsTileStart(E, TRADE_GFX.sheets.particles.tag) === TS_TAG_NONE) {  // (LoadBallParticleGfx)
+    tsLoadSheet(E, E.sheet("particles"));
+    tsLoadSpritePalette(E, E.pal("particles"));
+  }
+  const t = tsCreateTask(E, tsTaskParticles, 5);
+  t.data[1] = x; t.data[2] = y; t.data[3] = priority; t.data[4] = subpriority;
+  tsSe(E, "ball_open");
+}
+function tsTaskParticles(E, t) {  // PokeBallOpenParticleAnimation
+  if (t.data[0] < 16) {
+    const id = tsCreateSprite(E, E.tpl("particles", tsCbParticle1), t.data[1] & 0xFF, t.data[2] & 0xFF, t.data[4] & 0xFF);
+    if (id !== 64) {
+      const P = E.sprites[id];
+      tsStartAnim(P, 0);
+      P.oam.priority = t.data[3] & 3;
+      P.data[0] = (t.data[0] & 0xFF) % 8 * 32;
+    }
+    if (t.data[0] === 15) { if (id !== 64) E.sprites[id].data[7] = 1; tsDestroyTask(E, t); return; }
+  }
+  t.data[0]++;
+}
+function tsCbParticle1(E, S) { if (S.data[1] === 0) S.callback = tsCbParticle2; else S.data[1]--; }
+function tsCbParticle2(E, S) {
+  S.x2 = tsSine(S.data[0], S.data[1]); S.y2 = tsCos(S.data[0], S.data[1]);
+  S.data[1] += 2;
+  if (S.data[1] === 50) { if (S.data[7] === 1) tsDestroyAndFree(E, S); else tsDestroySprite(E, S); }  // (DestroyBallOpenAnimationParticle)
+}
+function tsFadeMonTask(E, palNum, sel) {  // LaunchBallFadeMonTask (unfadeLater: the Pokémon all the ball's color, back later)
+  const t = tsCreateTask(E, tsTaskFadeMonToNormal, 5);
+  t.data[3] = palNum; t.sel = sel;
+  tsBlendPalette(E, 256 + 16 * palNum, 16, 16, TRADE_GFX.tables.ball_fade);
+  t.data[0] = 16; t.data[1] = -1;
+  tsBeginFade(E, sel, 0, 0, 16, TS_RGB_WHITE);
+}
+function tsTaskFadeMonToNormal(E, t) {  // Task_FadeMon_ToNormal
+  if (!E.fade.active) { tsBeginFade(E, t.sel, 0, 16, 0, TS_RGB_WHITE); t.func = tsTaskFadeMonStep; }
+}
+function tsTaskFadeMonStep(E, t) {  // Task_FadeMon_ToNormal_Step
+  if (t.data[2] <= 16) {
+    tsBlendPalette(E, 256 + 16 * t.data[3], 16, t.data[0], TRADE_GFX.tables.ball_fade);
+    t.data[0] += t.data[1]; t.data[2]++;
+  } else tsDestroyTask(E, t);
+}
+function tsCbTradeBall(E, S) {  // SpriteCB_TradePokeball: the Pokémon going in
+  if (S.data[1] !== 0) { S.data[1]--; return; }
+  const M = E.sprites[S.data[0]];
+  tsStartAnim(S, 1);
+  tsBallOpens(E, S);
+  S.callback = tsCbTradeBallSendOff;
+  tsStartAffine(E, M, TS_BALL_AFFINE_RETURN);
+  tsAnimate(E, M);
+  M.data[1] = 0;
+}
+function tsCbTradeBallSendOff(E, S) {  // SpriteCB_TradePokeballSendOff
+  if (++S.data[5] === 11) tsSe(E, "ball_trade");
+  const M = E.sprites[S.data[0]];
+  if (M.affineAnimEnded) { tsStartAnim(S, 2); M.invisible = true; S.data[5] = 0; S.callback = tsCbTradeBallEnd; }
+  else { M.data[1] += 96; M.y2 = -M.data[1] >> 8; }
+}
+function tsCbTradeBallEnd(E, S) { if (S.animEnded) S.callback = tsDummy; }  // SpriteCB_TradePokeballEnd
+function tsCbReleaseBall(E, S) {  // SpriteCB_PokeballReleaseMon: the Pokémon coming out
+  if (S.data[1] !== 0) { S.data[1]--; return; }
+  const M = E.sprites[S.data[0]];
+  tsStartAnim(S, 1);
+  tsBallOpens(E, S);
+  S.callback = tsCbReleasedFlyOut;
+  M.invisible = false;
+  tsStartAffine(E, M, TS_BALL_AFFINE_EMERGE);
+  tsAnimate(E, M);
+  M.data[1] = 0x1000;
+  S.data[7] = 0;
+}
+function tsCbReleasedFlyOut(E, S) {  // SpriteCB_ReleasedMonFlyOut
+  let emerged = false, there = false;
+  const M = E.sprites[S.data[0]];
+  if (S.animEnded) S.invisible = true;
+  if (M.affineAnimEnded) { tsStartAffine(E, M, 0); emerged = true; }
+  M.x = tsS16(Math.trunc((S.data[5] - S.x) * S.data[7] / 128) + S.x);
+  M.y = tsS16(Math.trunc((S.data[6] - S.y) * S.data[7] / 128) + S.y);
+  if (S.data[7] < 128) {
+    const sine = -(TRADE_GFX.tables.sine[S.data[7] & 0xFF] / 8 | 0);
+    S.data[7] += 4;
+    M.x2 = sine; M.y2 = sine;
+  } else { M.x = S.data[5]; M.y = S.data[6]; M.x2 = 0; M.y2 = 0; there = true; }
+  if (S.animEnded && emerged && there) tsDestroyAndFree(E, S);
+}
+// the scene's tasks
+function tsTaskSignal(E, t) {  // Task_AnimateWirelessSignal (tIdx, tCounter, tSignalComingBack)
+  const P = TRADE_GFX.tables.signal_params, idx = t.data[0], pal = 16 * P[2 * idx];
+  tsLoadPalette(E, pal === 0x100 ? TS_U16(E.bin.signal_off) : TS_U16(t.data[2] ? E.bin.signal_in : E.bin.signal_out).subarray(pal, pal + 16), 48);
+  if (P[2 * idx] === 0 && t.data[1] === 0) tsSe(E, "heal_bell");
+  if (t.data[1] === P[2 * idx + 1]) {
+    t.data[0]++; t.data[1] = 0;
+    if ((P[2 * t.data[0] + 1] & 0xFF) === 0xFF) tsDestroyTask(E, t);
+  } else t.data[1]++;
+}
+const tsWinRange = (a, b) => (a & 0xFF) << 8 | (b & 0xFF);
+function tsTaskOpenColumn(E, t) {  // Task_OpenCenterWhiteColumn
+  const S = E.S;
+  if (t.data[0] === 0) {
+    S.win0left = S.win0right = 120; S.win0top = 0; S.win0bottom = 160;
+    tsSetReg(E, "DISPCNT", tsGetReg(E, "DISPCNT") | DISPCNT_WIN0_ON);
+    tsSetReg(E, "WINOUT", 0x10); tsSetReg(E, "WININ", 0x13);
+  }
+  tsSetReg(E, "WIN0H", tsWinRange(S.win0left, S.win0right)); tsSetReg(E, "WIN0V", tsWinRange(S.win0top, S.win0bottom));
+  t.data[0]++;
+  S.win0left = (S.win0left - 5) & 0xFF; S.win0right = (S.win0right + 5) & 0xFF;
+  if (S.win0left < 80) tsDestroyTask(E, t);
+}
+function tsTaskCloseColumn(E, t) {  // Task_CloseCenterWhiteColumn
+  const S = E.S;
+  if (t.data[0] === 0) { S.win0left = 80; S.win0right = 160; tsSetReg(E, "WINOUT", 0x10); tsSetReg(E, "WININ", 0x13); }
+  tsSetReg(E, "WIN0H", tsWinRange(S.win0left, S.win0right)); tsSetReg(E, "WIN0V", tsWinRange(S.win0top, S.win0bottom));
+  if (S.win0left !== 120) {
+    t.data[0]++;
+    S.win0left += 5; S.win0right -= 5;
+    if (S.win0left > 115) tsBlendPalettes(E, 0x8, 0, TS_RGB_WHITE);
+  } else { tsSetReg(E, "DISPCNT", tsGetReg(E, "DISPCNT") & ~DISPCNT_WIN0_ON); tsDestroyTask(E, t); }
+}
+// DoTradeAnim_Wireless
+function tsAnim(E) {
+  const S = E.S, spr = id => E.sprites[id], me = () => spr(S.mon[TS_PLAYER]), them = () => spr(S.mon[TS_PARTNER]);
+  const T = E.T.texts, y = ofs => E.mons[ofs].y_offset;
+  switch (S.state) {
+    case TS.START:
+      Object.assign(me(), {invisible: false, x2: -180, y2: y(TS_PLAYER)});
+      S.state++;
+      break;
+    case TS.MON_SLIDE_IN:
+      if (S.bg2hofs > 0) { me().x2 += 3; S.bg2hofs -= 3; }
+      else { me().x2 = 0; S.bg2hofs = 0; S.state = TS.SEND_MSG; }
+      break;
+    case TS.SEND_MSG:
+      tsWindowText(E, T.sent_to);
+      tsCry(E, TS_PLAYER);
+      S.state = TS.BYE_BYE; S.timer = 0;
+      break;
+    case TS.BYE_BYE:
+      if (++S.timer === 80) {
+        S.releaseBall = tsBallSprite(E, S.mon[TS_PLAYER], me().oam.paletteNum, 120, 32, 2, 1, 0x14, 0xFFFFF, tsCbTradeBall);
+        S.state++;
+        tsWindowText(E, T.bye_bye);
+      }
+      break;
+    case TS.POKEBALL_DEPART:
+      if (spr(S.releaseBall).callback === tsDummy) {
+        S.bouncingBall = tsCreateSprite(E, E.tpl("pokeball", tsCbBouncingDepart), 120, 32, 0);
+        tsDestroySprite(E, spr(S.releaseBall));
+        S.state++;
+      }
+      break;
+    case TS.POKEBALL_DEPART_WAIT: break;  // (its sprite's: SpriteCB_BouncingPokeballDepartEnd)
+    case TS.FADE_OUT_TO_GBA_SEND:
+      tsBeginFade(E, 0xFFFFFFFF, 0, 0, 16, TS_RGB_BLACK);
+      S.state = TS.WAIT_FADE_OUT_TO_GBA_SEND;
+      break;
+    case TS.WAIT_FADE_OUT_TO_GBA_SEND:
+      if (!E.fade.active) { tsBgRegs(E, 4); tsWindowText(E, ""); S.state++; }
+      break;
+    case TS.FADE_IN_TO_GBA_SEND: tsBeginFade(E, 0xFFFFFFFF, -1, 16, 0, TS_RGB_BLACK); S.state++; break;
+    case TS.WAIT_FADE_IN_TO_GBA_SEND: if (!E.fade.active) S.state = TS.GBA_ZOOM_OUT; break;
+    case TS.GBA_ZOOM_OUT:
+      if (S.zoom > 0x100) S.zoom -= 0x34;
+      else { tsBgRegs(E, 1); S.zoom = 0x80; S.state = TS.GBA_FLASH_SEND_WIRELESS; S.timer = 0; }
+      S.sXY = Math.trunc(0x8000 / S.zoom) & 0xFFFF;
+      break;
+    case TS.GBA_FLASH_SEND_WIRELESS:
+      if (++S.timer > 20) {
+        tsBgRegs(E, 3);
+        S.conn2 = tsCreateSprite(E, E.tpl("gba_flash_short", tsCbGbaScreen), 120, 80, 0);
+        S.state++;
+      }
+      break;
+    case TS.GBA_STOP_FLASH_SEND_WIRELESS:
+      if (spr(S.conn2).animEnded) {
+        tsDestroySprite(E, spr(S.conn2));
+        tsSetReg(E, "BLDCNT", 0x02 | 0x10 | 0x40 | 0x400);  // (BG1 and sprites over BG2)
+        tsSetReg(E, "BLDALPHA", 16 | 4 << 8);
+        tsCreateTask(E, tsTaskSignal, 5);
+        S.state++;
+      }
+      break;
+    case TS.WAIT_WIRELESS_SIGNAL_SEND: if (!tsTaskActive(E, tsTaskSignal)) S.state = TS.PAN_AWAY_GBA; break;
+    case TS.PAN_AWAY_GBA: if (--S.bg1vofs === 316) S.state++; break;
+    case TS.CREATE_LINK_MON_LEAVING:
+      S.conn1 = tsCreateSprite(E, E.tpl("link_mon_glow", tsCbGlowWireless), 120, 80, 3);
+      S.conn2 = tsCreateSprite(E, E.tpl("link_mon_shadow", tsCbShadow), 120, 80, 0);
+      tsStartAnim(spr(S.conn2), 1);
+      S.state++;
+      break;
+    case TS.LINK_MON_TRAVEL_OUT:
+      if ((S.bg1vofs -= 3) === 166) S.state = TS.LINK_MON_TRAVEL_OFFSCREEN;
+      tsSetReg(E, "DISPCNT", DISPCNT_MODE_1 | DISPCNT_OBJ_1D_MAP | DISPCNT_BG1_ON | DISPCNT_OBJ_ON);
+      break;
+    case TS.LINK_MON_TRAVEL_OFFSCREEN:
+      spr(S.conn1).y -= 2; spr(S.conn2).y -= 2;
+      if (spr(S.conn1).y < -8) S.state = TS.FADE_OUT_TO_CROSSING;
+      break;
+    case TS.FADE_OUT_TO_CROSSING: tsBeginFade(E, 0xFFFFFFFF, -1, 0, 16, TS_RGB_BLACK); S.state = TS.WAIT_FADE_OUT_TO_CROSSING; break;
+    case TS.WAIT_FADE_OUT_TO_CROSSING:
+      if (!E.fade.active) { tsDestroySprite(E, spr(S.conn1)); tsDestroySprite(E, spr(S.conn2)); tsBgRegs(E, 2); S.state++; }
+      break;
+    case TS.FADE_IN_TO_CROSSING:
+      tsBeginFade(E, 0xFFFFFFFF, -1, 16, 0, TS_RGB_BLACK);
+      S.conn1 = tsCreateSprite(E, E.tpl("link_mon_shadow", tsCbShadow), 111, 170, 0);
+      S.conn2 = tsCreateSprite(E, E.tpl("link_mon_shadow", tsCbShadow), 129, -10, 0);
+      S.state++;
+      break;
+    case TS.WAIT_FADE_IN_TO_CROSSING:
+      if (!E.fade.active) { tsSe(E, "warp_out"); S.state++; }
+      spr(S.conn1).y2 -= 3; spr(S.conn2).y2 += 3;
+      break;
+    case TS.CROSSING_LINK_MONS_ENTER:
+      spr(S.conn1).y2 -= 3; spr(S.conn2).y2 += 3;
+      if (spr(S.conn1).y2 <= -90) { spr(S.conn1).data[1] = 1; spr(S.conn2).data[1] = 1; S.state++; tsCreateTask(E, tsTaskOpenColumn, 5); }
+      break;
+    case TS.CROSSING_BLEND_WHITE_1: case TS.CROSSING_BLEND_WHITE_2: case TS.CROSSING_BLEND_WHITE_3:
+      tsBlendPalettes(E, 0x8, 16, TS_RGB_WHITE);
+      S.state++;
+      break;
+    case TS.CROSSING_CREATE_MON_PICS: {
+      const A = me(), B = them();
+      if (!E.mons[TS_PLAYER].no_flip) {  // (shown the other way round: sAffineAnims_CrossingMonPics)
+        A.affineAnims = TRADE_GFX.crossing;
+        A.oam.affineMode = 3;
+        tsCenterToCorner(A, 0, 3, 3);
+      }
+      tsStartAffine(E, A, 0);
+      tsStartAffine(E, B, 0);
+      Object.assign(A, {x: 40, y: 192, invisible: false});
+      Object.assign(B, {x: 200, y: -32, invisible: false});
+      S.state++;
+      break;
+    }
+    case TS.CROSSING_MON_PICS_MOVE: {
+      const A = me(), B = them();
+      A.y2 -= 3; B.y2 += 3;
+      if (A.y2 < -160 && A.y2 >= -163) tsSe(E, "warp_in");
+      if (A.y2 < -222) {
+        spr(S.conn1).data[1] = 0; spr(S.conn2).data[1] = 0;
+        S.state++;
+        A.invisible = true; B.invisible = true;
+        tsCreateTask(E, tsTaskCloseColumn, 5);
+      }
+      break;
+    }
+    case TS.CROSSING_LINK_MONS_EXIT:
+      spr(S.conn1).y2 -= 3; spr(S.conn2).y2 += 3;
+      if (spr(S.conn1).y2 <= -222) {
+        tsBeginFade(E, 0xFFFFFFFF, -1, 0, 16, TS_RGB_BLACK);
+        S.state++;
+        tsDestroySprite(E, spr(S.conn1)); tsDestroySprite(E, spr(S.conn2));
+      }
+      break;
+    case TS.CREATE_LINK_MON_ARRIVING:
+      if (!E.fade.active) {
+        S.state++;
+        tsBgRegs(E, 1);
+        S.bg1vofs = 166;
+        tsBgRegs(E, 3);
+        S.bg2vofs = 412;
+        S.conn1 = tsCreateSprite(E, E.tpl("link_mon_glow", tsCbGlowWireless), 120, -20, 3);
+        S.conn2 = tsCreateSprite(E, E.tpl("link_mon_shadow", tsCbShadow), 120, -20, 0);
+        tsStartAnim(spr(S.conn2), 1);
+      }
+      break;
+    case TS.FADE_OUT_TO_GBA_RECV: tsBeginFade(E, 0xFFFFFFFF, -1, 16, 0, TS_RGB_BLACK); S.state++; break;
+    case TS.WAIT_FADE_OUT_TO_GBA_RECV:
+      tsSetReg(E, "DISPCNT", DISPCNT_OBJ_1D_MAP | DISPCNT_BG1_ON | DISPCNT_OBJ_ON);
+      if (!E.fade.active) S.state++;
+      break;
+    case TS.LINK_MON_TRAVEL_IN:
+      spr(S.conn1).y2 += 4; spr(S.conn2).y2 += 4;
+      if (spr(S.conn1).y2 + spr(S.conn1).y === 64) { S.state = TS.PAN_TO_GBA_WIRELESS; S.timer = 0; }
+      break;
+    case TS.PAN_TO_GBA_WIRELESS:
+      tsSetReg(E, "DISPCNT", DISPCNT_OBJ_1D_MAP | DISPCNT_BG1_ON | DISPCNT_BG2_ON | DISPCNT_OBJ_ON);
+      S.bg1vofs += 3; S.bg2vofs += 3;
+      if (++S.timer === 10) tsCreateTask(E, tsTaskSignal, 5).data[2] = 1;
+      if (S.bg1vofs > 316) { S.bg1vofs = 316; S.state++; }
+      break;
+    case TS.DESTROY_LINK_MON_WIRELESS:
+      tsDestroySprite(E, spr(S.conn1)); tsDestroySprite(E, spr(S.conn2));
+      S.state++; S.timer = 0;
+      break;
+    case TS.WAIT_WIRELESS_SIGNAL_RECV: if (!tsTaskActive(E, tsTaskSignal)) { S.state = TS.LINK_MON_ARRIVED_DELAY; S.timer = 0; } break;
+    case TS.LINK_MON_ARRIVED_DELAY: if (++S.timer === 10) S.state++; break;
+    case TS.MOVE_GBA_TO_CENTER: if (++S.bg1vofs > 348) { S.bg1vofs = 348; S.state++; } break;
+    case TS.GBA_FLASH_RECV:
+      S.conn2 = tsCreateSprite(E, E.tpl("gba_flash_long", tsCbGbaScreen), 120, 80, 0);
+      S.state = TS.GBA_STOP_FLASH_RECV;
+      break;
+    case TS.GBA_STOP_FLASH_RECV:
+      if (spr(S.conn2).animEnded) { tsDestroySprite(E, spr(S.conn2)); tsBgRegs(E, 6); S.state++; tsSe(E, "sand_attack"); }
+      break;
+    case TS.GBA_ZOOM_IN:
+      if (S.zoom < 0x400) S.zoom += 0x34; else { S.zoom = 0x400; S.state++; }
+      S.sXY = Math.trunc(0x8000 / S.zoom) & 0xFFFF;
+      break;
+    case TS.FADE_OUT_TO_NEW_MON: tsBeginFade(E, 0xFFFFFFFF, 0, 0, 16, TS_RGB_BLACK); S.state = TS.WAIT_FADE_OUT_TO_NEW_MON; break;
+    case TS.WAIT_FADE_OUT_TO_NEW_MON:
+      if (!E.fade.active) { tsBgRegs(E, 5); tsBgRegs(E, 7); E.fade.transferDisabled = true; S.state++; }
+      break;
+    case TS.FADE_IN_TO_NEW_MON: E.fade.transferDisabled = false; tsBeginFade(E, 0xFFFFFFFF, 0, 16, 0, TS_RGB_BLACK); S.state++; break;
+    case TS.WAIT_FADE_IN_TO_NEW_MON:
+      tsSetReg(E, "DISPCNT", DISPCNT_OBJ_1D_MAP | DISPCNT_BG2_ON | DISPCNT_OBJ_ON);
+      if (!E.fade.active) S.state++;
+      break;
+    case TS.POKEBALL_ARRIVE: {
+      S.bouncingBall = tsCreateSprite(E, E.tpl("pokeball", tsCbBouncingArrive), 120, -8, 0);
+      const B = spr(S.bouncingBall);
+      B.data[3] = 74;
+      tsStartAnim(B, 1);
+      tsStartAffine(E, B, 2);
+      tsBlendPalettes(E, 1 << (16 + B.oam.paletteNum), 16, TS_RGB_WHITE);
+      S.state++; S.timer = 0;
+      break;
+    }
+    case TS.FADE_POKEBALL_TO_NORMAL: tsBeginFade(E, 1 << (16 + spr(S.bouncingBall).oam.paletteNum), 1, 16, 0, TS_RGB_WHITE); S.state++; break;
+    case TS.POKEBALL_ARRIVE_WAIT: if (spr(S.bouncingBall).callback === tsDummy) S.state++; break;  // (its picture loaded again)
+    case TS.SHOW_NEW_MON: {
+      const B = them();
+      Object.assign(B, {x: 120, y: y(TS_PARTNER) + 60, x2: 0, y2: 0});
+      tsStartAnim(B, 0);
+      const R = spr(tsBallSprite(E, S.mon[TS_PARTNER], B.oam.paletteNum, 120, 84, 2, 1, 20, 0xFFFFF, tsCbReleaseBall));
+      R.data[5] = B.x; R.data[6] = B.y;  // (CreatePokeballSpriteToReleaseMon: where the Pokémon ends up)
+      B.x = 120; B.y = 84; B.invisible = true;
+      tsFreeMatrixOf(E, spr(S.bouncingBall));
+      tsDestroySprite(E, spr(S.bouncingBall));
+      S.state++;
+      break;
+    }
+    case TS.NEW_MON_MSG:
+      tsSetReg(E, "DISPCNT", DISPCNT_OBJ_1D_MAP | DISPCNT_BG0_ON | DISPCNT_BG2_ON | DISPCNT_OBJ_ON);
+      tsWindowText(E, T.sent_over);
+      S.state = TS.DELAY_FOR_MON_ANIM; S.timer = 0;
+      break;
+    case TS.DELAY_FOR_MON_ANIM: if (++S.timer > 60) { S.cryFrames = tsCry(E, TS_PARTNER); S.state = TS.WAIT_FOR_MON_CRY; S.timer = 0; S.cry = 0; } break;
+    case TS.WAIT_FOR_MON_CRY: if (++S.cry >= S.cryFrames) S.state = TS.TAKE_CARE_OF_MON; break;  // (IsCryFinished)
+    case TS.TAKE_CARE_OF_MON:
+      if (++S.timer === 10) tsSe(E, "evolved");
+      if (S.timer === 250) { S.state++; tsWindowText(E, T.take_care); S.timer = 0; }
+      break;
+    case TS.AFTER_NEW_MON_DELAY: if (++S.timer === 60) S.state++; break;
+    case TS.CHECK_RIBBONS: S.state++; break;
+    case TS.END_LINK_TRADE: if (E.keysNew & 1) S.state++; break;
+    case TS.TRY_EVOLUTION: S.state++; break;  // (TradeMons: the server's; no in-game trade's Pokémon evolves by trading)
+    case TS.FADE_OUT_END: tsBeginFade(E, 0xFFFFFFFF, 0, 0, 16, TS_RGB_BLACK); S.state++; break;
+    case TS.WAIT_FADE_OUT_END: if (!E.fade.active) S.done = true; break;
+  }
+}
+
+// ---- drawing a frame, as the GBA does: the BGs (text, or BG2 affine in mode 1), sprites (affine ones sampled through
+// their matrix), window 0, alpha blending; into rgba (240x160, RGBA), colors as mGBA turns 5 bits into 8 ---------------
+const TS_TEXT_SIZES = [[256, 256], [512, 256], [256, 512], [512, 512]];
+function tsRender(E, rgba) {
+  const reg = name => tsGetReg(E, name), dispcnt = reg("DISPCNT"), mode = dispcnt & 7, V = E.vram, P = E.pltt;
+  const bldcnt = reg("BLDCNT"), alpha = reg("BLDALPHA"), eva = Math.min(16, alpha & 31), evb = Math.min(16, alpha >> 8 & 31);
+  const effect = bldcnt >> 6 & 3, win0 = dispcnt & DISPCNT_WIN0_ON, winin = reg("WININ"), winout = reg("WINOUT");
+  const w0h = reg("WIN0H"), w0v = reg("WIN0V"), wl = w0h >> 8, wr = w0h & 0xFF, wt = w0v >> 8, wb = w0v & 0xFF;
+  // sprites first: each pixel's color (palette index), priority, and whether it's semi-transparent
+  const objC = new Int16Array(240 * 160).fill(-1), objP = new Uint8Array(240 * 160).fill(4), objSemi = new Uint8Array(240 * 160);
+  if (dispcnt & DISPCNT_OBJ_ON)
+    for (let i = 0; i < 128; i++) {
+      const a0 = E.oam[4 * i], a1 = E.oam[4 * i + 1], a2 = E.oam[4 * i + 2], aff = a0 >> 8 & 3;
+      if (aff === 2) continue;  // (not shown)
+      const shape = a0 >> 14, size = a1 >> 14;
+      if (shape === 3) continue;
+      const [w, h] = TS_OAM_DIMS[shape][size], bw = aff === 3 ? 2 * w : w, bh = aff === 3 ? 2 * h : h;
+      let x = a1 & 0x1FF, y = a0 & 0xFF;
+      if (x >= 240) x -= 512;
+      if (y + bh > 256) y -= 256;
+      const bpp8 = a0 >> 13 & 1, tile = a2 & 0x3FF, prio = a2 >> 10 & 3, pal = a2 >> 12, semi = (a0 >> 10 & 3) === 1;
+      let pa = 0x100, pb = 0, pc = 0, pd = 0x100;
+      if (aff & 1) { const m = (a1 >> 9 & 0x1F) * 4; pa = tsS16(E.oam[4 * m + 3]); pb = tsS16(E.oam[4 * m + 7]); pc = tsS16(E.oam[4 * m + 11]); pd = tsS16(E.oam[4 * m + 15]); }
+      const hflip = !(aff & 1) && a1 >> 12 & 1, vflip = !(aff & 1) && a1 >> 13 & 1;
+      for (let py = 0; py < bh; py++) {
+        const sy = y + py;
+        if (sy < 0 || sy >= 160) continue;
+        for (let px = 0; px < bw; px++) {
+          const sx = x + px;
+          if (sx < 0 || sx >= 240) continue;
+          let tx, ty;
+          if (aff & 1) {
+            const dx = px - bw / 2, dy = py - bh / 2;
+            tx = ((pa * dx + pb * dy) >> 8) + w / 2; ty = ((pc * dx + pd * dy) >> 8) + h / 2;
+            if (tx < 0 || ty < 0 || tx >= w || ty >= h) continue;
+          } else { tx = hflip ? w - 1 - px : px; ty = vflip ? h - 1 - py : py; }
+          const at = sy * 240 + sx;
+          if (objC[at] >= 0 && objP[at] <= prio) continue;
+          let c;
+          if (bpp8) { const t = tile + 2 * ((ty >> 3) * (w >> 3) + (tx >> 3)); c = V[0x10000 + ((32 * t + 8 * (ty & 7) + (tx & 7)) & 0x7FFF)]; if (c) c += 256; }
+          else { const t = tile + (ty >> 3) * (w >> 3) + (tx >> 3), b = V[0x10000 + ((32 * t + 4 * (ty & 7) + (tx >> 1 & 3)) & 0x7FFF)]; c = tx & 1 ? b >> 4 : b & 15; if (c) c += 256 + 16 * pal; }
+          if (!c) continue;
+          objC[at] = c; objP[at] = prio; objSemi[at] = semi ? 1 : 0;
+        }
+      }
+    }
+  // the BGs that are on, in drawing order (priority, then number)
+  const bgs = [];
+  for (let n = 0; n < 4; n++) {
+    if (!(dispcnt & 0x100 << n) || (mode === 1 && n === 3) || mode > 1) continue;
+    const cnt = reg("BG" + n + "CNT");
+    bgs.push({n, prio: cnt & 3, char: (cnt >> 2 & 3) * 0x4000, screen: (cnt >> 8 & 0x1F) * 0x800, bpp8: cnt >> 7 & 1, size: cnt >> 14,
+              wrap: cnt >> 13 & 1, affine: mode === 1 && n === 2, hofs: reg("BG" + n + "HOFS") & 0x1FF, vofs: reg("BG" + n + "VOFS") & 0x1FF});
+  }
+  bgs.sort((a, b) => a.prio - b.prio || a.n - b.n);
+  const pa = tsS16(reg("BG2PA")), pb = tsS16(reg("BG2PB")), pc = tsS16(reg("BG2PC")), pd = tsS16(reg("BG2PD"));
+  const ref = (l, h) => ((h & 0xFFF) << 16 | l) << 4 >> 4, bg2x = ref(reg("BG2X_L"), reg("BG2X_H")), bg2y = ref(reg("BG2Y_L"), reg("BG2Y_H"));
+  const bgPixel = (B, x, y) => {  // a BG's palette index at a screen pixel (0: clear)
+    if (B.affine) {
+      const side = 128 << B.size, X = bg2x + pa * x + pb * y, Y = bg2y + pc * x + pd * y;
+      let tx = X >> 8, ty = Y >> 8;
+      if (B.wrap) { tx &= side - 1; ty &= side - 1; } else if (tx < 0 || ty < 0 || tx >= side || ty >= side) return 0;
+      const t = V[B.screen + (ty >> 3) * (side >> 3) + (tx >> 3)];
+      return V[B.char + 64 * t + 8 * (ty & 7) + (tx & 7)];
+    }
+    const [W, H] = TS_TEXT_SIZES[B.size], tx = (x + B.hofs) % W, ty = (y + B.vofs) % H;
+    let block = 0;
+    if (tx >= 256) block += 1;
+    if (ty >= 256) block += W === 512 ? 2 : 1;
+    const e = V[B.screen + 0x800 * block + 2 * (32 * ((ty & 255) >> 3) + ((tx & 255) >> 3))] | V[B.screen + 0x800 * block + 2 * (32 * ((ty & 255) >> 3) + ((tx & 255) >> 3)) + 1] << 8;
+    const tile = e & 0x3FF, fx = e & 0x400 ? 7 - (tx & 7) : tx & 7, fy = e & 0x800 ? 7 - (ty & 7) : ty & 7;
+    if (B.bpp8) return V[(B.char + 64 * tile + 8 * fy + fx) & 0xFFFF];
+    const b = V[(B.char + 32 * tile + 4 * fy + (fx >> 1)) & 0xFFFF], c = fx & 1 ? b >> 4 : b & 15;
+    return c ? 16 * (e >> 12) + c : 0;
+  };
+  const rgb = (c, out, at) => { out[at] = (c & 31) << 3 | (c & 31) >> 2; out[at + 1] = (c >> 5 & 31) << 3 | (c >> 5 & 31) >> 2; out[at + 2] = (c >> 10 & 31) << 3 | (c >> 10 & 31) >> 2; out[at + 3] = 255; };
+  const blend = (a, b, ea, eb) => {
+    const ch = s => Math.min(31, ((a >> s & 31) * ea + (b >> s & 31) * eb) >> 4);
+    return ch(0) | ch(5) << 5 | ch(10) << 10;
+  };
+  for (let y = 0; y < 160; y++)
+    for (let x = 0; x < 240; x++) {
+      const at = y * 240 + x;
+      const inWin = win0 && x >= wl && x < wr && y >= wt && y < wb, layers = win0 ? (inWin ? winin : winout) & 0x3F : 0x3F;
+      // the top two layers: [color, layer bit (BG n: 1 << n, sprites 16, backdrop 32), semi-transparent]
+      let top = null, second = null;
+      const put = (c, bit, semi) => { if (!top) top = [c, bit, semi]; else if (!second) second = [c, bit, semi]; };
+      const oc = objC[at] >= 0 && layers & 16 ? objC[at] : -1;
+      let objDone = oc < 0;  // (a sprite's drawn over BGs of its priority)
+      for (const B of bgs) {
+        if (second) break;
+        if (!objDone && objP[at] <= B.prio) { put(P[oc], 16, objSemi[at]); objDone = true; }
+        if (second || !(layers & 1 << B.n)) continue;
+        const c = bgPixel(B, x, y);
+        if (c) put(P[c], 1 << B.n, 0);
+      }
+      if (!objDone) put(P[oc], 16, objSemi[at]);
+      put(P[0], 32, 0);
+      let c = top[0];
+      if (layers & 32 && second) {
+        if (top[2] && bldcnt >> 8 & second[1]) c = blend(top[0], second[0], eva, evb);
+        else if (effect === 1 && bldcnt & top[1] && bldcnt >> 8 & second[1]) c = blend(top[0], second[0], eva, evb);
+      }
+      rgb(c, rgba, 4 * at);
+    }
+}
+// the scene on the page: the world fades out (DoInGameTradeScene), the scene plays a frame each FRAME_MS (by the clock,
+// catching up if the page fell behind), A at its end, and the world fades back in (its line after it is talk's)
+const TRADE_CANVAS = {c: null, img: null};
+function tradeText(text) {  // (the window's pixels: the normal font, 15 the background, 1 ink, 6 shadow; lines 16 apart)
+  const W = new IdxWindow(208, 32);
+  W.fill(15, 0, 0, 208, 32);
+  String(text).split("\n").forEach((line, i) => W.text("normal", line, 0, 2 + 16 * i, 1, 6));
+  return W.px;
+}
+async function tradeScene(t) {
+  try {
+    if (!TRADE_GFX) TRADE_GFX = await serverFetch(`/world/trade.json?v=${WORLD_DATA}`).then(r => r.json());
+  } catch (e) { log("the trade scene didn't load: " + (e.message || e)); return; }
+  const E = tsTradeNew(t, tradeText);
+  E.play = name => sfx(name);
+  E.cry = species => { cry(species); return cryFrames(species); };
+  await new Promise(ok => { WORLD.afterParty = ok; WORLD.party = {phase: "out", t0: performance.now(), held: null, toWorld: true, trade: {E, ran: 0}}; });
+}
+function tradeTick(g, P, now) {
+  const T = P.trade, E = T.E;
+  let due = Math.floor((now - P.t0) / FRAME_MS);
+  if (due - T.ran > 60) { P.t0 = now - (T.ran + 1) * FRAME_MS; due = T.ran + 1; }  // (the page was away: on from here)
+  while (T.ran < due && !E.S.done) { tsFrame(E); T.ran++; }
+  if (!TRADE_CANVAS.c) {
+    TRADE_CANVAS.c = document.createElement("canvas"); TRADE_CANVAS.c.width = 240; TRADE_CANVAS.c.height = 160;
+    TRADE_CANVAS.img = TRADE_CANVAS.c.getContext("2d").createImageData(240, 160);
+  }
+  tsRender(E, TRADE_CANVAS.img.data);
+  TRADE_CANVAS.c.getContext("2d").putImageData(TRADE_CANVAS.img, 0, 0);
+  g.drawImage(TRADE_CANVAS.c, 0, 0);
+  if (E.S.done) Object.assign(P, {phase: "back", t0: now});  // (black: the world fades in, partyFade)
+  return true;
+}
 // ---- the world by touch (and the mouse) -----------------------------------------------------------------------
 // Where the game has something on the screen to answer, a tap (or click) on it does what the buttons would: the text
 // box goes on, a menu's option is picked (one whose details show while the cursor's on it, as the Bag's items and a
@@ -10892,6 +12010,7 @@ function bagRow(P, r) {  // the Bag's cursor onto row r of its list (the bag sha
 }
 // a tap (or click) in the party menu's screens: the party, the Trainer Card, the Bag, giving or using an item
 function partyTap(P, p, mouse, e) {
+  if (P.trade) { partyA(); return; }
   if (P.townMap) { tmapTap(P, p, e); return; }  // (it keeps its own timings: no "open" phase)
   if (P.phase !== "open") return;
   if (P.summary) { summaryDown(P.summary, p, e); return; }
