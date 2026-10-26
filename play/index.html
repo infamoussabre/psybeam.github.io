@@ -444,7 +444,7 @@ function toggleHelp() { SHOW_HELP = !SHOW_HELP; store.set(HELP_KEY, SHOW_HELP ? 
 let SERVER_NAME = store.get(NAME_KEY) || "";
 setTimeout(() => setTitle());  // (once the rest of this script's run)
 // the page's title: "Psybeam v<version> - <server name>" (the version: the server's, filled in as it serves the page)
-const VERSION = "0.1.522";
+const VERSION = "0.1.523";
 if (!VERSION.startsWith("__")) $("#verNum").textContent = "v" + VERSION;  // (bottom left, as the player's id is bottom right)
 function markStale(stale, note = "Reload the app to update") {  // this page's PROTOCOL isn't the server's: red,
   $("#ver").classList.toggle("stale", stale);                       // with how to fix it
@@ -1653,12 +1653,14 @@ function sfxStart() {
     }
   })().catch(() => {}).finally(() => { SFX.loading = false; });
 }
-// one played (null: it can't be now): the source, for sfxStop; one that goes round (the low-HP alarm) goes on till then
-function sfx(name) {
+// one played (null: it can't be now): the source, for sfxStop; one that goes round (the low-HP alarm) goes on till then.
+// rate: faster or slower, its pitch with it (1: as the game plays it)
+function sfx(name, rate = 1) {
   const s = SFX.on ? SFX.at[name] : null, c = s && SFX.cats[s.cat];
   if (!c || SFX.ctx.state !== "running") return null;
   const src = SFX.ctx.createBufferSource(), [start, length, loopStart, loopEnd] = s.at;
   src.buffer = c.buf;
+  src.playbackRate.value = rate;
   src.connect(c.gain);
   if (loopEnd != null) { src.loop = true; src.loopStart = start + loopStart; src.loopEnd = start + loopEnd; src.start(0, start); }
   else src.start(0, start, length);
@@ -6258,8 +6260,9 @@ function landingEffects(chars, now) {  // keeps WORLD.landings current; returns 
 // step's start after. Both follow whoever it is, centred on them, their bottom at their feet, just in front of them.
 // The sounds are only for your own steps. And, with SOUND EFFECTS ENHANCED (SFX.enhanced), the sounds the game never
 // had: each of your steps (walking or running, not surfing) as it starts, by the block stepped onto: tall grass's,
-// SE_BALL_TRAY_ENTER; anywhere else dry, SE_BALL_TRAY_EXIT (a puddle or shallow water already has its own).
-const MB_PUDDLE = 0x16, MB_SHALLOW_WATER = 0x17, SPLASH_STEP_FRAMES = 4;
+// SE_BALL_TRAY_ENTER; anywhere else dry, SE_BALL_TRAY_EXIT (a puddle or shallow water already has its own), each a
+// little faster or slower (its pitch with it) at random, STEP_RATE either way, so they don't all sound the same.
+const MB_PUDDLE = 0x16, MB_SHALLOW_WATER = 0x17, SPLASH_STEP_FRAMES = 4, STEP_RATE = 0.1;
 const FLOWING_FRAMES = [[0, 4], [1, 4], [0, 6], [1, 6], [0, 8], [1, 8], [0, 6], [1, 6]];  // (sAnim_Splash_1, round and round)
 let SPLASH_IMG = null;
 loadImage("/world/effect/splash.png").then(img => { SPLASH_IMG = img; }, () => {});
@@ -6273,7 +6276,7 @@ function stepBegins(c, from, kind, now) {  // (animate: c is on its new block)
   if (to === MB_PUDDLE && was === MB_PUDDLE) { c.splash = now; if (mine) sfx("puddle"); }
   else if (to === MB_SHALLOW_WATER && was === MB_SHALLOW_WATER) { if (mine && c.flowing) sfx("puddle"); }
   else if (mine && SFX.enhanced && (kind === "walk" || kind === "run") && to !== MB_PUDDLE && to !== MB_SHALLOW_WATER)
-    sfx(MB_TALL_GRASS.includes(to) ? "ball_tray_enter" : "ball_tray_exit");
+    sfx(MB_TALL_GRASS.includes(to) ? "ball_tray_enter" : "ball_tray_exit", 1 + (Math.random() * 2 - 1) * STEP_RATE);
 }
 function splashEffects(chars, now) {  // returns what to draw: [{x, y, splash: frame}]
   const out = [];
