@@ -444,7 +444,7 @@ function toggleHelp() { SHOW_HELP = !SHOW_HELP; store.set(HELP_KEY, SHOW_HELP ? 
 let SERVER_NAME = store.get(NAME_KEY) || "";
 setTimeout(() => setTitle());  // (once the rest of this script's run)
 // the page's title: "Psybeam v<version> - <server name>" (the version: the server's, filled in as it serves the page)
-const VERSION = "0.1.525";
+const VERSION = "0.1.526";
 if (!VERSION.startsWith("__")) $("#verNum").textContent = "v" + VERSION;  // (bottom left, as the player's id is bottom right)
 function markStale(stale, note = "Reload the app to update") {  // this page's PROTOCOL isn't the server's: red,
   $("#ver").classList.toggle("stale", stale);                       // with how to fix it
@@ -4536,6 +4536,7 @@ const WORLD = {cache: {}, sprites: {}, infos: {}, cur: null, placed: [], cam: {x
                doors: [],    // doors opening, open or closing: {map, x, y, size, key, open, start}
                grass: new Map(),  // tall grass covering someone: "map|x|y" -> {map, x, y, start}
                landings: [],  // what landing from a jump threw up, playing: [{map, x, y, start, name}]
+               footprints: [],  // left on sand, till they've faded: [{map, x, y, dx, dy (the way the step went), start}]
                escalators: [],  // escalators moving: [{map, x, y, up, start, limit, done}] (see updateEscalators)
                escTiles: {},  // map id -> {"x,y": metatile}: escalator steps not as the map has them
                emote: null,  // the "!" over a trainer who's seen you: {n, start}
@@ -5767,6 +5768,7 @@ function drawScene(D, left, top, now) {
   // heights 4, 6, 8, 10, 12, 13 and 14 put a character's sprite over it, as on escalators and bridges)
   const over = people.filter(p => p.c && (ABOVE_TOP_LAYER.includes(p.c.layer ?? p.c.elevation ?? 0)
                                          || (p.c.tele && (teleState(p.c, now) || {}).high)));
+  if (!D.only) drawFootprints(D.objLo, left, top, now);  // (under everyone)
   drawHeal(D.objLo, "balls", now, left, top);  // (a nurse's healing: the balls behind everyone, the monitor in front)
   drawPeople(D.objLo, people.filter(p => !over.includes(p)), left, top, now);
   drawHeal(D.objLo, "monitor", now, left, top);
@@ -6272,6 +6274,7 @@ function behaviorAt(map, x, y) {
   return m && x >= 0 && y >= 0 && x < m.width && y < m.height ? m.behaviors[m.blocks[x + y * m.width] & 0x3FF] : -1;
 }
 function stepBegins(c, from, kind, now) {  // (animate: c is on its new block)
+  if (!c.surfing) footprint(c, from, now);
   if (kind === "jump" || c.surfing) return;
   const to = behaviorAt(c.map, c.x, c.y), was = behaviorAt(from.map, from.x, from.y), mine = c === WORLD.me;
   if (to === MB_PUDDLE && was === MB_PUDDLE) { c.splash = now; if (mine) sfx("puddle"); }
@@ -6301,6 +6304,33 @@ function splashEffects(chars, now) {  // returns what to draw: [{x, y, splash: f
     if (at) out.push({x: at[0], y: at[1] + 8, splash: frame});
   }
   return out;
+}
+// ---- footprints in the sand (GetGroundEffectFlags_Tracks, FldEff_SandFootprints) --------------------------
+// A step's start off a sand block leaves footprints on it, the way the step goes (sAnimTable_SandFootprints: frame 0
+// going north, flipped upside down going south; frame 1 going west, flipped going east). They're under everyone
+// (subpriority 149) and the map's top layer (priority 2); 41 frames on they flicker, a frame off then a frame on,
+// and from 57 frames on they're gone (FadeFootprintsTireTracks_Step0, _Step1).
+const MB_SAND = [0x21, 0x2B], FOOTPRINT_STEADY = 41, FOOTPRINT_GONE = 57;
+let FOOTPRINT_IMG = null;
+loadImage("/world/effect/sand_footprints.png").then(img => { FOOTPRINT_IMG = img; }, () => {});
+function footprint(c, from, now) {
+  if (from.map !== c.map || !MB_SAND.includes(behaviorAt(from.map, from.x, from.y))) return;
+  const dx = Math.sign(c.x - from.x), dy = Math.sign(c.y - from.y);
+  if (dx || dy) WORLD.footprints.push({map: from.map, x: from.x, y: from.y, dx, dy, start: now});
+}
+function drawFootprints(g, left, top, now) {
+  WORLD.footprints = WORLD.footprints.filter(f => now - f.start < FOOTPRINT_GONE * FRAME_MS);
+  if (!FOOTPRINT_IMG) return;
+  for (const f of WORLD.footprints) {
+    const t = Math.floor((now - f.start) / FRAME_MS), to = placedOffset(f.map);
+    if (!to || (t > FOOTPRINT_STEADY && (t - FOOTPRINT_STEADY) % 2)) continue;
+    const x = to[0] + f.x * 16 - left, y = to[1] + f.y * 16 - top;
+    g.save();
+    g.translate(x + (f.dx > 0 ? 16 : 0), y + (f.dy > 0 ? 16 : 0));
+    g.scale(f.dx > 0 ? -1 : 1, f.dy > 0 ? -1 : 1);
+    g.drawImage(FOOTPRINT_IMG, f.dx ? 16 : 0, 0, 16, 16, 0, 0, 16, 16);
+    g.restore();
+  }
 }
 // ---- walking ---------------------------------------------------------------------------------------
 const KEY_DIRS = {ArrowUp: "north", ArrowDown: "south", ArrowLeft: "west", ArrowRight: "east"};
